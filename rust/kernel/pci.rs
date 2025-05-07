@@ -393,6 +393,29 @@ impl Device {
         // - by its type invariant `self.as_raw` is always a valid pointer to a `struct pci_dev`.
         Ok(unsafe { bindings::pci_resource_len(self.as_raw(), bar.try_into()?) })
     }
+
+    pub fn dma_set_mask(&self, mask: u64) -> Result {
+        // SAFETY: By the type invariant of `device::Device`, `self.as_ref().as_raw()` is valid.
+        let ret =
+            unsafe { bindings::dma_set_mask(&(*self.as_raw()).dev as *const _ as *mut _, mask) };
+        if ret != 0 {
+            Err(Error::from_errno(ret))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn dma_set_coherent_mask(&self, mask: u64) -> Result {
+        // SAFETY: By the type invariant of `device::Device`, `self.as_ref().as_raw()` is valid.
+        let ret = unsafe {
+            bindings::dma_set_coherent_mask(&(*self.as_raw()).dev as *const _ as *mut _, mask)
+        };
+        if ret != 0 {
+            Err(Error::from_errno(ret))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl Device<device::Bound> {
