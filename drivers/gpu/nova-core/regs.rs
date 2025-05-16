@@ -110,6 +110,12 @@ impl NV_PFB_PRI_MMU_WPR2_ADDR_HI {
 
 /* PGC6 */
 
+// Boot Sequence Interface (BSI) register used to determine
+// if GSP reload/resume has completed during the boot process.
+register!(NV_PGC6_BSI_SECURE_SCRATCH_14 @ 0x001180f8 {
+    26:26   boot_stage_3_handoff as bool;
+});
+
 register!(NV_PGC6_AON_SECURE_SCRATCH_GROUP_05_PRIV_LEVEL_MASK @ 0x00118128 {
     0:0     read_protection_level0 as bool, "Set after FWSEC lowers its protection level";
 });
