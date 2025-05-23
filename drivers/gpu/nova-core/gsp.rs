@@ -27,6 +27,8 @@ use crate::nvfw::r570_144 as fw;
 use crate::regs::NV_PGSP_QUEUE_HEAD;
 use crate::util::wait_on;
 
+pub(crate) mod sequencer;
+
 pub(crate) const GSP_PAGE_SHIFT: usize = 12;
 pub(crate) const GSP_PAGE_SIZE: usize = 1 << GSP_PAGE_SHIFT;
 pub(crate) const GSP_HEAP_SHIFT: u64 = 1 << 20;
@@ -137,6 +139,44 @@ pub(crate) trait GspMessageElement {
     }
 }
 
+pub(crate) struct GspSequencerInfo {
+    info: fw::rpc_run_cpu_sequencer_v17_00,
+    cmd_data: KVec<u8>,
+}
+
+impl GspMessageElement for GspSequencerInfo {
+    fn new_from_slices(slice_1: &[u8], slice_2: Option<&[u8]>) -> Result<Self> {
+        // First, extract the info field from the beginning of the data
+        let info_size = size_of::<fw::rpc_run_cpu_sequencer_v17_00>();
+
+        // Check if we have enough data for the info field
+        let total_available = slice_1.len() + slice_2.map_or(0, |s| s.len());
+        if total_available < info_size {
+            return Err(EINVAL);
+        }
+
+        let info = fw::rpc_run_cpu_sequencer_v17_00::new_from_slices(slice_1, slice_2)?;
+
+        if slice_1.len() <= info_size {
+            return Err(EINVAL);
+        }
+
+        let mut data_len = slice_1.len() - info_size;
+        if let Some(slice) = slice_2 {
+            data_len += slice.len();
+        }
+
+        let mut cmd_data = KVec::with_capacity(data_len, GFP_KERNEL)?;
+        cmd_data.extend_from_slice(&slice_1[info_size..], GFP_KERNEL)?;
+
+        if let Some(slice) = slice_2 {
+            cmd_data.extend_from_slice(slice, GFP_KERNEL)?;
+        }
+
+        Ok(GspSequencerInfo { info, cmd_data })
+    }
+}
+
 // This next section contains constants and structures hand-coded from the GSP
 // headers We could replace these with bindgen versions, but that's a bit of a
 // pain because they basically end up pulling in the world (ie. definitions for
@@ -211,6 +251,8 @@ struct GspMem {
     gspq: Msgq,
 }
 
+impl GspMessageElement for fw::rpc_run_cpu_sequencer_v17_00 {}
+
 // Needed for CoherentAllocation
 unsafe impl FromBytes for GspMem {}
 unsafe impl AsBytes for GspMem {}
@@ -232,6 +274,7 @@ pub(crate) struct GspCmdq<'a> {
 
 enum GspResponse {
     Unsupported(#[allow(dead_code)] u32),
+    RunCpuSequencer(GspSequencerInfo),
 }
 
 impl<'a> GspCmdq<'a> {
@@ -538,8 +581,8 @@ impl<'a> GspCmdq<'a> {
                 Ok(GspResponse::Unsupported(rpc.function))
             }
             fw::NV_VGPU_MSG_EVENT_GSP_RUN_CPU_SEQUENCER => {
-                pr_info!("Received NV_VGPU_MSG_EVENT_GSP_RUN_CPU_SEQUENCER event\n");
-                Ok(GspResponse::Unsupported(rpc.function))
+                let gsp_sequencer_info = GspSequencerInfo::new_from_slices(slice_1, slice_2)?;
+                Ok(GspResponse::RunCpuSequencer(gsp_sequencer_info))
             }
             fw::NV_VGPU_MSG_EVENT_GSP_POST_NOCAT_RECORD => {
                 pr_info!("Received GSP_POST_NOCAT_RECORD event\n");
@@ -687,6 +730,39 @@ impl<'a> GspCmdq<'a> {
         };
 
         result
+    }
+
+    pub(crate) fn run_sequencer(self: &mut Self, timeout: Delta) -> Result {
+        let seq_info = wait_on(timeout, || match self.receive() {
+            Ok(GspResponse::RunCpuSequencer(seq_info)) => Some(Ok(seq_info)),
+
+            // We don't expect any other response at this stage.
+            Ok(_) => Some(Err(EINVAL)),
+            Err(EAGAIN) => None,
+            Err(e) => Some(Err(e)),
+        })
+        .unwrap()?;
+        self.bar.try_access_with(|bar| {
+            match sequencer::GspSequencer::new(
+                seq_info,
+                bar,
+                self.sec2_falcon,
+                self.gsp_falcon,
+                self.libos_dma_handle,
+                self.fw,
+            ) {
+                Ok(sequencer) => {
+                    if let Err(e) = sequencer.run() {
+                        pr_info!("Error running CPU sequencer: {:?}\n", e);
+                    }
+                }
+                Err(e) => {
+                    pr_info!("Error creating CPU sequencer: {:?}\n", e);
+                }
+            }
+        });
+
+        Ok(())
     }
 }
 
