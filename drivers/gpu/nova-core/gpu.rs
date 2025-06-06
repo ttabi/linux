@@ -323,6 +323,12 @@ impl Gpu {
         let wpr_meta = gsp::build_wpr_meta(pdev.as_ref(), &fw, &fb_layout)?;
         let _wpr_handle = wpr_meta.dma_handle();
 
+        dev_info!(
+            pdev.as_ref(),
+            "RISC-V active? {}\n",
+            gsp_falcon.is_riscv_active(&bar)?,
+        );
+
         Ok(pin_init!(Self {
             spec,
             bar: devres_bar,
