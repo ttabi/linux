@@ -279,6 +279,9 @@ impl Gpu {
             spec.revision
         );
 
+        pdev.dma_set_mask((1 << 48) - 1)?;
+        pdev.dma_set_coherent_mask((1 << 48) - 1)?;
+
         // We must wait for GFW_BOOT completion before doing any significant setup on the GPU.
         gfw::wait_gfw_boot_completion(bar)
             .inspect_err(|_| dev_err!(pdev.as_ref(), "GFW boot did not complete"))?;
