@@ -362,9 +362,9 @@ impl<E: FalconEngine + 'static> Falcon<E> {
 
     /// Wait for memory scrubbing to complete.
     fn reset_wait_mem_scrubbing(&self, bar: &Bar0) -> Result {
-        // TIMEOUT: memory scrubbing should complete in less than 20ms.
         util::wait_on(Delta::from_millis(20), || {
-            if regs::NV_PFALCON_FALCON_HWCFG2::read(bar, E::BASE).mem_scrubbing_done() {
+            let r = regs::NV_PFALCON_FALCON_HWCFG2::read(bar, E::BASE);
+            if !r.mem_scrubbing() {
                 Some(())
             } else {
                 None
