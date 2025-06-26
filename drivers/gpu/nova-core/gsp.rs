@@ -251,6 +251,7 @@ struct GspMem {
     gspq: Msgq,
 }
 
+impl GspMessageElement for fw::GspStaticConfigInfo_t {}
 impl GspMessageElement for fw::rpc_run_cpu_sequencer_v17_00 {}
 
 // Needed for CoherentAllocation
@@ -275,6 +276,7 @@ pub(crate) struct GspCmdq<'a> {
 enum GspResponse {
     Unsupported(#[allow(dead_code)] u32),
     InitDone,
+    StaticConfigInfo(#[allow(dead_code)] fw::GspStaticConfigInfo_t),
     RunCpuSequencer(GspSequencerInfo),
 }
 
@@ -578,8 +580,8 @@ impl<'a> GspCmdq<'a> {
 
         let result = match rpc.function {
             fw::NV_VGPU_MSG_FUNCTION_GET_GSP_STATIC_INFO => {
-                pr_info!("Received NV_VGPU_MSG_FUNCTION_GET_GSP_STATIC_INFO event\n");
-                Ok(GspResponse::Unsupported(rpc.function))
+                let gsp_static_info = fw::GspStaticConfigInfo_t::new_from_slices(slice_1, slice_2)?;
+                Ok(GspResponse::StaticConfigInfo(gsp_static_info))
             }
             fw::NV_VGPU_MSG_EVENT_GSP_RUN_CPU_SEQUENCER => {
                 let gsp_sequencer_info = GspSequencerInfo::new_from_slices(slice_1, slice_2)?;
@@ -776,6 +778,29 @@ impl<'a> GspCmdq<'a> {
             Err(e) => Some(Err(e)),
         })
         .unwrap()?;
+
+        Ok(())
+    }
+
+    pub(crate) fn get_gsp_info(&mut self) -> Result<()> {
+        self.send(
+            fw::NV_VGPU_MSG_FUNCTION_GET_GSP_STATIC_INFO,
+            &EmptyCmd {
+                size: size_of::<fw::GspStaticConfigInfo_t>(),
+            },
+        )?;
+        let info = wait_on(Delta::from_secs(5), || match self.receive() {
+            Ok(GspResponse::StaticConfigInfo(gsp_static_info)) => Some(Ok(gsp_static_info)),
+            // We don't expect any other response at this stage.
+            Ok(_) => Some(Err(EINVAL)),
+            Err(EAGAIN) => None,
+            Err(e) => Some(Err(e)),
+        })
+        .unwrap()?;
+        pr_info!(
+            "GPU Name: {}\n",
+            core::str::from_utf8(&info.gpuNameString).unwrap_or("invalid utf8")
+        );
 
         Ok(())
     }
