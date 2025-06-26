@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 
 use kernel::dma::CoherentAllocation;
-use kernel::{device, devres::Devres, error::code::*, pci, prelude::*};
+use kernel::{device, devres::Devres, error::code::*, pci, prelude::*, time::Delta};
 
 use crate::driver::Bar0;
 use crate::falcon::{gsp::Gsp, sec2::Sec2, Falcon};
@@ -318,10 +318,31 @@ impl Gpu {
 
         Self::run_fwsec_frts(pdev.as_ref(), &gsp_falcon, bar, &bios, &fb_layout)?;
 
-        let mut _libos =
+        let mut libos =
             gsp::GspSharedMemObjects::new(pdev, &devres_bar, &gsp_falcon, &sec2_falcon, &fw)?;
+        let libos_handle = libos.libos.dma_handle();
+
         let wpr_meta = gsp::build_wpr_meta(pdev.as_ref(), &fw, &fb_layout)?;
-        let _wpr_handle = wpr_meta.dma_handle();
+        let wpr_handle = wpr_meta.dma_handle();
+
+        gsp_falcon.reset(&bar)?;
+        let (mbox0, mbox1) = gsp_falcon.boot(
+            &bar,
+            Some(libos_handle as u32),
+            Some((libos_handle >> 32) as u32),
+        )?;
+        dev_info!(pdev.as_ref(), "MBOX: {:#x},{:#x}\n", mbox0, mbox1,);
+
+        pr_info!("Trying to run Booter loader...\n");
+
+        sec2_falcon.reset(&bar)?;
+        sec2_falcon.dma_load(&bar, &fw.booter_load)?;
+        let (mbox0, mbox1) = sec2_falcon.boot(
+            &bar,
+            Some(wpr_handle as u32),
+            Some((wpr_handle >> 32) as u32),
+        )?;
+        dev_info!(pdev.as_ref(), "MBOX: {:#x},{:#x}\n", mbox0, mbox1,);
 
         dev_info!(
             pdev.as_ref(),
