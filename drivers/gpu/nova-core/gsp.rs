@@ -274,6 +274,7 @@ pub(crate) struct GspCmdq<'a> {
 
 enum GspResponse {
     Unsupported(#[allow(dead_code)] u32),
+    InitDone,
     RunCpuSequencer(GspSequencerInfo),
 }
 
@@ -590,7 +591,7 @@ impl<'a> GspCmdq<'a> {
             }
             fw::NV_VGPU_MSG_EVENT_GSP_INIT_DONE => {
                 pr_info!("Received GSP_INIT_DONE event\n");
-                Ok(GspResponse::Unsupported(rpc.function))
+                Ok(GspResponse::InitDone)
             }
             fw::NV_VGPU_MSG_EVENT_POST_EVENT => {
                 pr_info!("Received POST_EVENT event\n");
@@ -761,6 +762,20 @@ impl<'a> GspCmdq<'a> {
                 }
             }
         });
+
+        Ok(())
+    }
+
+    pub(crate) fn gsp_init_done(&mut self, timeout: Delta) -> Result {
+        wait_on(timeout, || match self.receive() {
+            Ok(GspResponse::InitDone) => Some(Ok(())),
+            Ok(GspResponse::Unsupported(_)) => None,
+            // We don't expect any other response at this stage.
+            Ok(_) => Some(Err(EINVAL)),
+            Err(EAGAIN) => None,
+            Err(e) => Some(Err(e)),
+        })
+        .unwrap()?;
 
         Ok(())
     }

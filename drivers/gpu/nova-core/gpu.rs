@@ -391,6 +391,7 @@ impl Gpu {
         }
 
         libos.cmdq.run_sequencer(Delta::from_secs(5))?;
+        libos.cmdq.gsp_init_done(Delta::from_secs(5))?;
 
         Ok(pin_init!(Self {
             spec,
