@@ -25,7 +25,7 @@ use crate::fb::FbLayout;
 use crate::firmware::Firmware;
 use crate::nvfw::r570_144 as fw;
 use crate::regs::NV_PGSP_QUEUE_HEAD;
-use crate::util::wait_on;
+use crate::util::wait_on_result;
 
 pub(crate) mod sequencer;
 
@@ -736,15 +736,14 @@ impl<'a> GspCmdq<'a> {
     }
 
     pub(crate) fn run_sequencer(self: &mut Self, timeout: Delta) -> Result {
-        let seq_info = wait_on(timeout, || match self.receive() {
+        let seq_info = wait_on_result(timeout, || match self.receive() {
             Ok(GspResponse::RunCpuSequencer(seq_info)) => Some(Ok(seq_info)),
 
             // We don't expect any other response at this stage.
             Ok(_) => Some(Err(EINVAL)),
             Err(EAGAIN) => None,
             Err(e) => Some(Err(e)),
-        })
-        .unwrap()?;
+        })?;
         self.bar.try_access_with(|bar| {
             match sequencer::GspSequencer::new(
                 seq_info,
@@ -769,15 +768,14 @@ impl<'a> GspCmdq<'a> {
     }
 
     pub(crate) fn gsp_init_done(&mut self, timeout: Delta) -> Result {
-        wait_on(timeout, || match self.receive() {
+        wait_on_result(timeout, || match self.receive() {
             Ok(GspResponse::InitDone) => Some(Ok(())),
             Ok(GspResponse::Unsupported(_)) => None,
             // We don't expect any other response at this stage.
             Ok(_) => Some(Err(EINVAL)),
             Err(EAGAIN) => None,
             Err(e) => Some(Err(e)),
-        })
-        .unwrap()?;
+        })?;
 
         Ok(())
     }
@@ -789,14 +787,13 @@ impl<'a> GspCmdq<'a> {
                 size: size_of::<fw::GspStaticConfigInfo_t>(),
             },
         )?;
-        let info = wait_on(Delta::from_secs(5), || match self.receive() {
+        let info = wait_on_result(Delta::from_secs(5), || match self.receive() {
             Ok(GspResponse::StaticConfigInfo(gsp_static_info)) => Some(Ok(gsp_static_info)),
             // We don't expect any other response at this stage.
             Ok(_) => Some(Err(EINVAL)),
             Err(EAGAIN) => None,
             Err(e) => Some(Err(e)),
-        })
-        .unwrap()?;
+        })?;
         pr_info!(
             "GPU Name: {}\n",
             core::str::from_utf8(&info.gpuNameString).unwrap_or("invalid utf8")
