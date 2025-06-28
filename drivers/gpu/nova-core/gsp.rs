@@ -14,6 +14,7 @@ use kernel::dma::CoherentAllocation;
 use kernel::pci;
 use kernel::pr_info;
 use kernel::prelude::*;
+use kernel::str::CStr;
 use kernel::time::Delta;
 use kernel::transmute::{AsBytes, FromBytes};
 use kernel::{dma_read, dma_write};
@@ -838,10 +839,14 @@ impl<'a> GspCmdq<'a> {
             Err(EAGAIN) => None,
             Err(e) => Some(Err(e)),
         })?;
-        pr_info!(
-            "GPU Name: {}\n",
-            core::str::from_utf8(&info.gpuNameString).unwrap_or("invalid utf8")
-        );
+        // The GPU Name byte array has a long list of zeroes at the end, but we don't want to pass
+        // those to pr_info!(). Instead, stop at the first terminating null.
+        let gpu_name = info.gpuNameString
+            .get(0..=info.gpuNameString.iter().position(|&b| b == 0).unwrap_or(info.gpuNameString.len() - 1))
+            .and_then(|bytes| CStr::from_bytes_with_nul(bytes).ok())
+            .and_then(|cstr| cstr.to_str().ok())
+            .unwrap_or("GPU Name: invalid utf8");
+        pr_info!("GPU Name: {}\n", gpu_name);
 
         Ok(())
     }
