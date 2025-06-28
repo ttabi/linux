@@ -251,7 +251,6 @@ struct GspMem {
     gspq: Msgq,
 }
 
-impl GspMessageElement for fw::GspStaticConfigInfo_t {}
 impl GspMessageElement for fw::rpc_run_cpu_sequencer_v17_00 {}
 
 // Needed for CoherentAllocation
@@ -276,8 +275,53 @@ pub(crate) struct GspCmdq<'a> {
 enum GspResponse {
     Unsupported(#[allow(dead_code)] u32),
     InitDone,
-    StaticConfigInfo(#[allow(dead_code)] fw::GspStaticConfigInfo_t),
+    StaticConfigInfo(#[allow(dead_code)] KBox<fw::GspStaticConfigInfo_t>),
     RunCpuSequencer(GspSequencerInfo),
+}
+
+impl GspMessageElement for fw::GspStaticConfigInfo_t {}
+
+// Helper function to create KBox<GspStaticConfigInfo_t> directly from slices
+fn new_gsp_static_config_from_slices(slice_1: &[u8], slice_2: Option<&[u8]>) -> Result<KBox<fw::GspStaticConfigInfo_t>> {
+    if let Some(some_slice) = slice_2 {
+        if slice_1.len() + some_slice.len() < size_of::<fw::GspStaticConfigInfo_t>() {
+            return Err(EINVAL);
+        }
+
+        // Allocate on heap to avoid stack overflow
+        let mut boxed_result = KBox::<fw::GspStaticConfigInfo_t>::new_uninit(GFP_KERNEL)?;
+        let result_ptr = boxed_result.as_mut_ptr() as *mut u8;
+        let mut offset = 0;
+        let copy_len = min(slice_1.len(), size_of::<fw::GspStaticConfigInfo_t>());
+        unsafe {
+            core::ptr::copy_nonoverlapping(slice_1.as_ptr(), result_ptr, copy_len);
+        }
+        offset += copy_len;
+        if offset < size_of::<fw::GspStaticConfigInfo_t>() {
+            let remaining = size_of::<fw::GspStaticConfigInfo_t>() - offset;
+            let copy_len = min(some_slice.len(), remaining);
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    some_slice.as_ptr(),
+                    result_ptr.add(offset),
+                    copy_len,
+                );
+            }
+        }
+
+        Ok(unsafe { boxed_result.assume_init() })
+    } else {
+        if slice_1.len() < size_of::<fw::GspStaticConfigInfo_t>() {
+            return Err(EINVAL);
+        }
+
+        let mut boxed_result = KBox::<fw::GspStaticConfigInfo_t>::new_uninit(GFP_KERNEL)?;
+        let result_ptr = boxed_result.as_mut_ptr() as *mut u8;
+        unsafe {
+            core::ptr::copy_nonoverlapping(slice_1.as_ptr(), result_ptr, size_of::<fw::GspStaticConfigInfo_t>());
+        }
+        Ok(unsafe { boxed_result.assume_init() })
+    }
 }
 
 impl<'a> GspCmdq<'a> {
@@ -580,7 +624,7 @@ impl<'a> GspCmdq<'a> {
 
         let result = match rpc.function {
             fw::NV_VGPU_MSG_FUNCTION_GET_GSP_STATIC_INFO => {
-                let gsp_static_info = fw::GspStaticConfigInfo_t::new_from_slices(slice_1, slice_2)?;
+                let gsp_static_info = new_gsp_static_config_from_slices(slice_1, slice_2)?;
                 Ok(GspResponse::StaticConfigInfo(gsp_static_info))
             }
             fw::NV_VGPU_MSG_EVENT_GSP_RUN_CPU_SEQUENCER => {
