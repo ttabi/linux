@@ -390,8 +390,8 @@ impl Gpu {
             }
         }
 
-        libos.cmdq.run_sequencer(Delta::from_secs(5))?;
-        libos.cmdq.gsp_init_done(Delta::from_secs(5))?;
+        libos.cmdq.run_sequencer(Delta::from_secs(10))?;
+        libos.cmdq.gsp_init_done(Delta::from_secs(10))?;
         libos.cmdq.get_gsp_info()?;
 
         // TODO: Figure out how to convince the compiler that the lifetime
