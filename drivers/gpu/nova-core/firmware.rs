@@ -27,6 +27,40 @@ pub(crate) mod riscv;
 pub(crate) mod sec2;
 
 pub(crate) const FIRMWARE_VERSION: &str = "570.144";
+struct FirmwarePathBuilder(KVec<u8>);
+
+impl FirmwarePathBuilder {
+    fn new() -> Self {
+        Self(KVec::new())
+    }
+
+    fn push(mut self, s: &str) -> Result<Self> {
+        self.0.extend_from_slice(s.as_bytes(), GFP_KERNEL)?;
+        Ok(self)
+    }
+
+    fn into_cstring(self) -> Result<CString> {
+        let mut buf = self.0;
+        buf.push(0, GFP_KERNEL)?;
+
+        let cstr = CStr::from_bytes_with_nul(&buf).map_err(|_| EINVAL)?;
+        Ok(CString::try_from(cstr)?)
+    }
+}
+
+/// Construct a pathname to load firmware files. Works for both runtime and compile-time contexts.
+macro_rules! push_firmware_path {
+    ($builder:expr, $chipset:expr, $name:expr, $version:expr) => {
+        $builder
+            .push("nvidia/")?
+            .push($chipset)?
+            .push("/gsp/")?
+            .push($name)?
+            .push("-")?
+            .push($version)?
+            .push(".bin")
+    };
+}
 
 fn elf_section<'a, 'b>(elf: &'a [u8], name: &'b str) -> Option<&'a [u8]> {
     let hdr = elf
@@ -104,7 +138,8 @@ impl Firmware {
         chip_name.make_ascii_lowercase();
 
         let request = |name_| {
-            CString::try_from_fmt(fmt!("nvidia/{}/gsp/{}-{}.bin", &*chip_name, name_, ver))
+            push_firmware_path!(FirmwarePathBuilder::new(), chip_name.to_str()?, name_, ver)?
+                .into_cstring()
                 .and_then(|path| firmware::Firmware::request(&path, dev))
         };
 
@@ -332,17 +367,12 @@ pub(crate) struct ModInfoBuilder<const N: usize>(firmware::ModInfoBuilder<N>);
 
 impl<const N: usize> ModInfoBuilder<N> {
     const fn make_entry_file(self, chipset: &str, fw: &str) -> Self {
-        ModInfoBuilder(
-            self.0
-                .new_entry()
-                .push("nvidia/")
-                .push(chipset)
-                .push("/gsp/")
-                .push(fw)
-                .push("-")
-                .push(FIRMWARE_VERSION)
-                .push(".bin"),
-        )
+        ModInfoBuilder(push_firmware_path!(
+            self.0.new_entry(),
+            chipset,
+            fw,
+            FIRMWARE_VERSION
+        ))
     }
 
     const fn make_entry_chipset(self, chipset: &str) -> Self {
