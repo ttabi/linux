@@ -257,6 +257,33 @@ impl Gpu {
         }
     }
 
+    /// Load and run the booter_load firmware using SEC2 falcon.
+    ///
+    /// This helper performs the complete SEC2 falcon boot sequence with the booter_load firmware.
+    fn run_sec2_booter_load(
+        pdev: &device::Device<device::Bound>,
+        sec2_falcon: &Falcon<Sec2>,
+        bar: &Bar0,
+        fw: &Firmware,
+        wpr_handle: u64,
+    ) -> Result<(u32, u32)> {
+        dev_info!(
+            pdev,
+            "Using SEC2 to load and run the booter_load firmware...\n"
+        );
+
+        sec2_falcon.reset(bar)?;
+        sec2_falcon.dma_load(bar, &fw.booter_load)?;
+        let (mbox0, mbox1) = sec2_falcon.boot(
+            bar,
+            Some(wpr_handle as u32),
+            Some((wpr_handle >> 32) as u32),
+        )?;
+        dev_info!(pdev, "SEC2 MBOX0: {:#x}, MBOX1: {:#x}\n", mbox0, mbox1);
+
+        Ok((mbox0, mbox1))
+    }
+
     /// Helper function to load and run the FWSEC-FRTS firmware and confirm that it has properly
     /// created the WPR2 region.
     ///
@@ -336,6 +363,123 @@ impl Gpu {
         }
     }
 
+    /// Returns a sysmem flush object for the given chipset.
+    fn create_sysmem_flush(
+        pdev: &pci::Device<device::Bound>,
+        bar: &Bar0,
+        spec: &Spec,
+    ) -> Result<SysmemFlush> {
+        SysmemFlush::register(pdev.as_ref(), bar, spec.chipset)
+    }
+
+    /// Returns the framebuffer layout and WPR metadata allocation.
+    fn create_common_memory_objects(
+        pdev: &pci::Device<device::Bound>,
+        bar: &Bar0,
+        fw: &Firmware,
+        spec: &Spec,
+    ) -> Result<(FbLayout, CoherentAllocation<fw::GspFwWprMeta>)> {
+        let fb_layout = FbLayout::new(spec.chipset, bar, fw)?;
+        dev_dbg!(pdev.as_ref(), "{:#x?}\n", fb_layout);
+
+        let wpr_meta = gsp::build_wpr_meta(pdev.as_ref(), fw, &fb_layout)?;
+
+        Ok((fb_layout, wpr_meta))
+    }
+
+    /// Create GSP falcon with architecture-specific validation logic.
+    ///
+    /// For Turing/Ampere/Ada, uses standard RISC-V validation.
+    fn create_gsp_falcon(
+        pdev: &pci::Device<device::Bound>,
+        bar: &Bar0,
+        spec: &Spec,
+    ) -> Result<Falcon<Gsp>> {
+        let gsp_falcon = Falcon::<Gsp>::new(pdev.as_ref(), spec.chipset)?;
+        gsp_falcon.clear_swgen0_intr(bar);
+
+        Ok(gsp_falcon)
+    }
+
+    /// Initialize base GPU engines: sysmem flush and GSP falcon.
+    ///
+    /// Returns the common components needed by all GPU architectures.
+    /// NOTE: This is kept for Turing/Ampere/Ada compatibility where both are created together.
+    fn init_base_engines(
+        pdev: &pci::Device<device::Bound>,
+        bar: &Bar0,
+        spec: &Spec,
+    ) -> Result<(SysmemFlush, Falcon<Gsp>)> {
+        let sysmem_flush = Self::create_sysmem_flush(pdev, bar, spec)?;
+        let gsp_falcon = Self::create_gsp_falcon(pdev, bar, spec)?;
+
+        Ok((sysmem_flush, gsp_falcon))
+    }
+
+    /// Boot GSP runtime.
+    ///
+    /// Performs the GSP falcon boot sequence. For Turing/Ampere/Ada, RISC-V activation
+    /// is checked later by the sequencer. For Hopper/Blackwell, additional steps are
+    /// handled after this function returns.
+    fn boot_gsp_runtime(
+        pdev: &pci::Device<device::Bound>,
+        bar: &Bar0,
+        gsp_falcon: &Falcon<Gsp>,
+        libos_handle: u64,
+    ) -> Result<()> {
+        // GSP falcon boot sequence
+        gsp_falcon.reset(bar)?;
+        let (mbox0, mbox1) = gsp_falcon.boot(
+            bar,
+            Some(libos_handle as u32),
+            Some((libos_handle >> 32) as u32),
+        )?;
+        dev_info!(
+            pdev.as_ref(),
+            "GSP MBOX0: {:#x}, MBOX1: {:#x}\n",
+            mbox0,
+            mbox1
+        );
+
+        Ok(())
+    }
+
+    /// Complete GSP initialization with common finalization steps.
+    ///
+    /// Handles OS version writing, debugfs setup, GSP init completion, and GPU info retrieval.
+    /// NOTE: Sequencer is architecture-specific and handled separately.
+    fn complete_gsp_initialization(
+        pdev: &pci::Device<device::Bound>,
+        bar: &Bar0,
+        gsp_falcon: &Falcon<Gsp>,
+        fw: &Firmware,
+        mut libos: crate::gsp::GspMemObjects<'_>,
+    ) -> Result<()> {
+        // Write OS version (common to all architectures)
+        gsp_falcon.write_os_version(bar, fw.gsp_desc.app_version())?;
+
+        // Initialize debugfs for GSP debugging
+        Self::init_debugfs(&libos);
+
+        // Complete GSP initialization sequence
+        libos.cmdq.gsp_init_done(Delta::from_secs(10))?;
+        libos.cmdq.get_gsp_info()?;
+        let info = libos.cmdq.get_gsp_info()?;
+        dev_info!(
+            pdev.as_ref(),
+            "GPU name: {}\n",
+            util::str_from_null_terminated(&info.gpu_name)
+        );
+
+        // TODO: Figure out how to convince the compiler that the lifetime
+        // parameter on GspMemObjects is satisfied when we pass it to
+        // pin_init below. For now we just leak the memory, which is not good
+        // but is better than a use-after-free.
+        core::mem::forget(libos);
+
+        Ok(())
+    }
+
     fn get_firmware_arch_group(arch: Architecture) -> FirmwareArchGroup {
         match arch {
             Architecture::Turing | Architecture::Ampere | Architecture::Ada => {
@@ -358,10 +502,7 @@ impl Gpu {
         gfw::wait_gfw_boot_completion(bar)
             .inspect_err(|_| dev_err!(pdev.as_ref(), "GFW boot did not complete"))?;
 
-        let sysmem_flush = SysmemFlush::register(pdev.as_ref(), bar, spec.chipset)?;
-
-        let gsp_falcon = Falcon::<Gsp>::new(pdev.as_ref(), spec.chipset)?;
-        gsp_falcon.clear_swgen0_intr(bar);
+        let (sysmem_flush, gsp_falcon) = Self::init_base_engines(pdev, bar, spec)?;
 
         let sec2_falcon = Falcon::<Sec2>::new(pdev.as_ref(), spec.chipset)?;
 
@@ -373,52 +514,17 @@ impl Gpu {
             FIRMWARE_VERSION,
         )?;
 
-        let fb_layout = FbLayout::new(spec.chipset, bar, &fw)?;
-        dev_dbg!(pdev.as_ref(), "{:#x?}\n", fb_layout);
-
+        let (fb_layout, wpr_meta) = Self::create_common_memory_objects(pdev, bar, &fw, spec)?;
         let bios = Vbios::new(pdev, bar)?;
-
         Self::run_fwsec_frts(pdev.as_ref(), &gsp_falcon, bar, &bios, &fb_layout)?;
 
         let mut libos = gsp::GspMemObjects::new(pdev, &devres_bar, &gsp_falcon, &sec2_falcon, &fw)?;
         let libos_handle = libos.libos.dma_handle();
-        let wpr_meta = gsp::build_wpr_meta(pdev.as_ref(), &fw, &fb_layout)?;
         let wpr_handle = wpr_meta.dma_handle();
 
-        gsp_falcon.reset(&bar)?;
-        let (mbox0, mbox1) = gsp_falcon.boot(
-            &bar,
-            Some(libos_handle as u32),
-            Some((libos_handle >> 32) as u32),
-        )?;
-        dev_info!(
-            pdev.as_ref(),
-            "GSP MBOX0: {:#x}, MBOX1: {:#x}\n",
-            mbox0,
-            mbox1
-        );
+        Self::boot_gsp_runtime(pdev, bar, &gsp_falcon, libos_handle)?;
 
-        dev_info!(
-            pdev.as_ref(),
-            "Using SEC2 to load and run the booter_load firmware...\n"
-        );
-
-        sec2_falcon.reset(&bar)?;
-        sec2_falcon.dma_load(&bar, &fw.booter_load)?;
-        let (mbox0, mbox1) = sec2_falcon.boot(
-            &bar,
-            Some(wpr_handle as u32),
-            Some((wpr_handle >> 32) as u32),
-        )?;
-        dev_info!(
-            pdev.as_ref(),
-            "SEC2 MBOX0: {:#x}, MBOX1{:#x}\n",
-            mbox0,
-            mbox1
-        );
-
-        // Match what Nouveau does here:
-        gsp_falcon.write_os_version(&bar, fw.gsp_desc.app_version())?;
+        Self::run_sec2_booter_load(pdev.as_ref(), &sec2_falcon, bar, &fw, wpr_handle)?;
 
         // Poll for RISC-V to become active before running sequencer
         util::wait_on(Delta::from_secs(5), || {
@@ -435,23 +541,10 @@ impl Gpu {
             gsp_falcon.is_riscv_active(&bar)?,
         );
 
-        Self::init_debugfs(&libos);
-
+        // Run CPU sequencer for Turing/Ampere/Ada (SEC2-based architectures)
         libos.cmdq.run_sequencer(Delta::from_secs(10))?;
-        libos.cmdq.gsp_init_done(Delta::from_secs(10))?;
-        libos.cmdq.get_gsp_info()?;
-        let info = libos.cmdq.get_gsp_info()?;
-        dev_info!(
-            pdev.as_ref(),
-            "GPU name: {}\n",
-            util::str_from_null_terminated(&info.gpu_name)
-        );
 
-        // TODO: Figure out how to convince the compiler that the lifetime
-        // parameter on GspMemObjects is satisfied when we pass it to
-        // pin_init below. For now we just leak the memory, which is not good
-        // but is better than a use-after-free.
-        core::mem::forget(libos);
+        Self::complete_gsp_initialization(pdev, bar, &gsp_falcon, &fw, libos)?;
 
         Ok((fw, sysmem_flush, wpr_meta))
     }
