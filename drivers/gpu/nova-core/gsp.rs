@@ -226,7 +226,7 @@ pub(crate) struct GspCmdq<'a> {
     nr_ptes: u32,
     bar: &'a Devres<Bar0>,
     gsp_falcon: &'a Falcon<Gsp>,
-    sec2_falcon: &'a Falcon<Sec2>,
+    sec2_falcon: Option<&'a Falcon<Sec2>>,
     libos_dma_handle: u64,
     fw: &'a Firmware,
     dev: &'a device::Device<device::Bound>,
@@ -238,7 +238,7 @@ impl<'a> GspCmdq<'a> {
         dev: &'a device::Device<device::Bound>,
         bar: &'a Devres<Bar0>,
         gsp_falcon: &'a Falcon<Gsp>,
-        sec2_falcon: &'a Falcon<Sec2>,
+        sec2_falcon: Option<&'a Falcon<Sec2>>,
         libos_dma_handle: u64,
         fw: &'a Firmware,
     ) -> Result<GspCmdq<'a>> {
@@ -520,7 +520,7 @@ impl<'a> GspCmdq<'a> {
         let sbuf = if rpc.length + header_size < remaining {
             SBuffer::new((
                 &mut msg_slice[(header_size as usize)..(header_size + rpc.length) as usize],
-                None
+                None,
             ))?
         } else {
             let slice_1 =
@@ -587,15 +587,22 @@ impl<'a> GspCmdq<'a> {
     }
 
     pub(crate) fn run_sequencer(self: &mut Self, timeout: Delta) -> Result {
+        // Always consume the sequencer message first to unblock the message queue
         let seq_info = self.receive_wait::<GspSequencerInfo>(
             timeout,
             fw::NV_VGPU_MSG_EVENT_GSP_RUN_CPU_SEQUENCER,
         )?;
+
+        // Skip sequencer processing for architectures without SEC2 (like Blackwell)
+        if self.sec2_falcon.is_none() {
+            pr_info!("Skipping CPU sequencer processing - not needed for this architecture\n");
+            return Ok(());
+        }
         self.bar.try_access_with(|bar| {
             match sequencer::GspSequencer::new(
                 seq_info,
                 bar,
-                self.sec2_falcon,
+                self.sec2_falcon.unwrap(),
                 self.gsp_falcon,
                 self.libos_dma_handle,
                 self.fw,
@@ -958,7 +965,7 @@ impl<'a> GspMemObjects<'a> {
         pdev: &'a pci::Device<device::Bound>,
         bar: &'a Devres<Bar0>,
         gsp_falcon: &'a Falcon<Gsp>,
-        sec2_falcon: &'a Falcon<Sec2>,
+        sec2_falcon: Option<&'a Falcon<Sec2>>,
         fw: &'a Firmware,
     ) -> Result<Self> {
         let dev = pdev.as_ref();
