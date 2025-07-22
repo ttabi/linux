@@ -4,7 +4,7 @@ use kernel::dma::CoherentAllocation;
 use kernel::{c_str, device, devres::Devres, error::code::*, pci, prelude::*, time::Delta};
 
 use crate::driver::Bar0;
-use crate::falcon::{gsp::Gsp, sec2::Sec2, Falcon};
+use crate::falcon::{fsp::Fsp as FspEngine, gsp::Gsp, sec2::Sec2, Falcon};
 use crate::fb::FbLayout;
 use crate::fb::SysmemFlush;
 use crate::firmware::fwsec::{FwsecCommand, FwsecFirmware};
@@ -124,7 +124,7 @@ impl fmt::Display for Chipset {
 }
 
 /// Enum representation of the GPU generation.
-#[derive(fmt::Debug)]
+#[derive(fmt::Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Architecture {
     Turing = 0x16,
     Ampere = 0x17,
@@ -273,7 +273,8 @@ impl Gpu {
         );
 
         sec2_falcon.reset(bar)?;
-        sec2_falcon.dma_load(bar, &fw.booter_load)?;
+        let booter_load = fw.booter_load.as_ref().ok_or(EINVAL)?;
+        sec2_falcon.dma_load(bar, booter_load)?;
         let (mbox0, mbox1) = sec2_falcon.boot(
             bar,
             Some(wpr_handle as u32),
@@ -389,7 +390,7 @@ impl Gpu {
 
     /// Create GSP falcon with architecture-specific validation logic.
     ///
-    /// For Turing/Ampere/Ada, uses standard RISC-V validation.
+    /// For Hopper/Blackwell, RISC-V validation is skipped until after FSP Chain of Trust.
     fn create_gsp_falcon(
         pdev: &pci::Device<device::Bound>,
         bar: &Bar0,
@@ -444,10 +445,20 @@ impl Gpu {
         Ok(())
     }
 
+    fn get_firmware_arch_group(arch: Architecture) -> FirmwareArchGroup {
+        match arch {
+            Architecture::Turing | Architecture::Ampere | Architecture::Ada => {
+                FirmwareArchGroup::TuringAmpereAda
+            }
+            Architecture::Blackwell => FirmwareArchGroup::HopperBlackwellPlus,
+            Architecture::Hopper => FirmwareArchGroup::HopperBlackwellPlus,
+        }
+    }
+
     /// Complete GSP initialization with common finalization steps.
     ///
     /// Handles OS version writing, debugfs setup, GSP init completion, and GPU info retrieval.
-    /// NOTE: Sequencer is architecture-specific and handled separately.
+    /// Returns the GSP falcon.
     fn complete_gsp_initialization(
         pdev: &pci::Device<device::Bound>,
         bar: &Bar0,
@@ -480,16 +491,6 @@ impl Gpu {
         Ok(())
     }
 
-    fn get_firmware_arch_group(arch: Architecture) -> FirmwareArchGroup {
-        match arch {
-            Architecture::Turing | Architecture::Ampere | Architecture::Ada => {
-                FirmwareArchGroup::TuringAmpereAda
-            }
-            Architecture::Blackwell => FirmwareArchGroup::HopperBlackwellPlus,
-            Architecture::Hopper => FirmwareArchGroup::HopperBlackwellPlus,
-        }
-    }
-
     /// Architecture-specific initialization and GSP boot for Turing, Ampere, and Ada GPUs.
     fn turing_ampere_ada_init_and_boot(
         pdev: &pci::Device<device::Bound>,
@@ -506,7 +507,8 @@ impl Gpu {
 
         let sec2_falcon = Falcon::<Sec2>::new(pdev.as_ref(), spec.chipset)?;
 
-        let fw = Firmware::new(
+        // Create firmware using SEC2 falcon
+        let fw = Firmware::new_turing_ampere_ada(
             pdev.as_ref(),
             &sec2_falcon,
             bar,
@@ -518,7 +520,8 @@ impl Gpu {
         let bios = Vbios::new(pdev, bar)?;
         Self::run_fwsec_frts(pdev.as_ref(), &gsp_falcon, bar, &bios, &fb_layout)?;
 
-        let mut libos = gsp::GspMemObjects::new(pdev, &devres_bar, &gsp_falcon, &sec2_falcon, &fw)?;
+        let mut libos =
+            gsp::GspMemObjects::new(pdev, &devres_bar, &gsp_falcon, Some(&sec2_falcon), &fw)?;
         let libos_handle = libos.libos.dma_handle();
         let wpr_handle = wpr_meta.dma_handle();
 
@@ -549,6 +552,148 @@ impl Gpu {
         Ok((fw, sysmem_flush, wpr_meta))
     }
 
+    /// Architecture-specific initialization and GSP boot for Hopper, Blackwell, and later GPUs.
+    fn hopper_blackwell_plus_init_and_boot(
+        pdev: &pci::Device<device::Bound>,
+        devres_bar: &Devres<Bar0>,
+        spec: &Spec,
+    ) -> Result<(Firmware, SysmemFlush, CoherentAllocation<fw::GspFwWprMeta>)> {
+        let bar = devres_bar.access(pdev.as_ref())?;
+
+        // Initialize sysmem flush first (always needed)
+        let sysmem_flush = Self::create_sysmem_flush(pdev, bar, spec)?;
+
+        let fw = Firmware::new_hopper_blackwell_plus(pdev.as_ref(), spec.chipset, FIRMWARE_VERSION)
+            .inspect_err(|e| dev_err!(pdev.as_ref(), "Failed to create firmware: {e:?}"))?;
+
+        let (fb_layout, wpr_meta) = Self::create_common_memory_objects(pdev, bar, &fw, spec)
+            .inspect_err(|e| dev_err!(pdev.as_ref(), "Failed to create memory objects: {e:?}"))?;
+
+        // Create GSP falcon - for Blackwell, we skip RISC-V validation until after FSP
+        let gsp_falcon = Self::create_gsp_falcon(pdev, bar, spec)
+            .inspect_err(|e| dev_err!(pdev.as_ref(), "Failed to create GSP falcon: {e:?}"))?;
+
+        // For Blackwell: Execute FSP Chain of Trust BEFORE creating libos
+        if spec.chipset.arch() == Architecture::Blackwell {
+            dev_info!(pdev.as_ref(), "Blackwell: Executing FSP Chain of Trust\n");
+
+            // Verify FMC firmware is loaded
+            let (fmc_image_fw, fmc_full_fw) = fw
+                .fmc
+                .as_ref()
+                .ok_or(EINVAL)
+                .inspect_err(|e| dev_err!(pdev.as_ref(), "FMC firmware not loaded: {e:?}"))?;
+
+            // Wait for FSP to complete its initial secure boot process
+            dev_info!(
+                pdev.as_ref(),
+                "Waiting for FSP initial secure boot completion\n"
+            );
+            crate::fsp::Fsp::wait_secure_boot(pdev.as_ref(), bar, spec.chipset.arch())
+                .inspect_err(|e| {
+                    dev_err!(pdev.as_ref(), "FSP initial secure boot failed: {e:?}")
+                })?;
+
+            // Create FSP falcon for Chain of Trust communication
+            let fsp_falcon = Falcon::<FspEngine>::new(pdev.as_ref(), spec.chipset)?;
+
+            // Create temporary libos for FSP COT message
+            let temp_libos = gsp::GspMemObjects::new(pdev, devres_bar, &gsp_falcon, None, &fw)
+                .inspect_err(|e| {
+                    dev_err!(pdev.as_ref(), "Failed to create temporary libos: {e:?}")
+                })?;
+            let libos_handle = temp_libos.libos.dma_handle();
+
+            // Create FMC boot parameters structure (what FSP actually expects!)
+            let fmc_boot_params = crate::fsp::Fsp::create_fmc_boot_params(
+                pdev.as_ref(),
+                wpr_meta.dma_handle(),
+                core::mem::size_of::<fw::GspFwWprMeta>() as u32, // Fixed 256 bytes like Nouveau
+                libos_handle,
+            )
+            .inspect_err(|e| dev_err!(pdev.as_ref(), "Failed to create FMC boot params: {e:?}"))?;
+
+            // Extract FMC signatures from full ELF data BEFORE boot
+            let fmc_full_data =
+                unsafe { core::slice::from_raw_parts(fmc_full_fw.start_ptr(), fmc_full_fw.size()) };
+            let signatures =
+                crate::fsp::Fsp::extract_fmc_signatures_static(pdev.as_ref(), fmc_full_data)?;
+
+            // Execute FSP Chain of Trust with FMC image data and pre-extracted signatures
+            dev_info!(
+                pdev.as_ref(),
+                "Executing FSP Chain of Trust with FMC boot params: {:#x}\n",
+                fmc_boot_params.dma_handle()
+            );
+            crate::fsp::Fsp::boot_gsp_fmc_with_signatures(
+                pdev.as_ref(),
+                bar,
+                spec.chipset,
+                fmc_image_fw,
+                &fmc_boot_params,
+                fb_layout.rsvd_size as u64,
+                false,
+                &fsp_falcon,
+                &signatures, // Pre-extracted signatures
+            )
+            .inspect_err(|e| {
+                dev_err!(pdev.as_ref(), "Failed to execute FSP Chain of Trust: {e:?}")
+            })?;
+
+            // Wait for GSP lockdown to be released (matching Nouveau's gh100_gsp_lockdown_released)
+            dev_info!(pdev.as_ref(), "Waiting for GSP lockdown release\n");
+            util::wait_on(Delta::from_secs(4), || {
+                // Read GSP falcon mailbox0 to check for lockdown release
+                let mbox0 = match gsp_falcon.read_mailbox0(bar) {
+                    Ok(val) => val,
+                    Err(_) => return None, // Still inaccessible
+                };
+
+                // If mbox0 has 0xbadf4100 pattern, GSP is still locked down
+                if mbox0 & 0xffffff00 == 0xbadf4100 {
+                    None // Still locked down
+                } else {
+                    Some(()) // Lockdown released
+                }
+            })
+            .inspect_err(|_| dev_err!(pdev.as_ref(), "GSP lockdown release timeout"))?;
+
+            dev_info!(
+                pdev.as_ref(),
+                "GSP hardware unlocked, proceeding with initialization\n"
+            );
+
+            // Clean up temporary libos
+            core::mem::drop(temp_libos);
+        }
+
+        // Continue with the libos initialization and GSP boot sequence (no SEC2)
+        // Use the SAME working GSP infrastructure as Ampere, just without SEC2 booter
+        let libos =
+            gsp::GspMemObjects::new(pdev, devres_bar, &gsp_falcon, None, &fw).inspect_err(|e| {
+                dev_err!(pdev.as_ref(), "Failed to create GSP memory objects: {e:?}")
+            })?;
+
+        dev_info!(
+            pdev.as_ref(),
+            "GSP already running after FSP, skipping falcon boot\n"
+        );
+
+        Self::complete_gsp_initialization(pdev, bar, &gsp_falcon, &fw, libos).inspect_err(|e| {
+            dev_err!(
+                pdev.as_ref(),
+                "Failed to complete GSP initialization: {e:?}"
+            )
+        })?;
+
+        dev_info!(
+            pdev.as_ref(),
+            "Hopper/Blackwell+ firmware initialization complete\n"
+        );
+
+        Ok((fw, sysmem_flush, wpr_meta))
+    }
+
     pub(crate) fn new(
         pdev: &pci::Device<device::Bound>,
         devres_bar: Devres<Bar0>,
@@ -573,8 +718,7 @@ impl Gpu {
                 Self::turing_ampere_ada_init_and_boot(pdev, &devres_bar, &spec)?
             }
             FirmwareArchGroup::HopperBlackwellPlus => {
-                // TODO: Implement in Step 4
-                return Err(ENOTSUPP);
+                Self::hopper_blackwell_plus_init_and_boot(pdev, &devres_bar, &spec)?
             }
         };
 

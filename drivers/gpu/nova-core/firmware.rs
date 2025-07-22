@@ -163,12 +163,15 @@ fn get_signature_section(chipset: Chipset) -> Result<&'static str> {
 /// Structure encapsulating the firmware blobs required for the GPU to operate.
 #[expect(dead_code)]
 pub(crate) struct Firmware {
-    pub booter_load: Sec2Firmware,
-    pub booter_unload: Sec2Firmware,
+    pub booter_load: Option<Sec2Firmware>,
+    pub booter_unload: Option<Sec2Firmware>,
     pub bootloader: RiscvFirmware,
     pub gsp: RadixFirmware,
     pub gsp_sigs: DmaObject,
     pub gsp_desc: RmRiscvUCodeDesc,
+    /// FMC firmware for Hopper/Blackwell+ architectures that use FSP boot sequence
+    /// Contains (image_data, full_elf_data) - image for FSP, full ELF for signature extraction
+    pub fmc: Option<(DmaObject, DmaObject)>,
 }
 
 impl Firmware {
@@ -218,7 +221,8 @@ impl Firmware {
         Ok((gsp, gsp_sigs, gsp_desc))
     }
 
-    pub(crate) fn new(
+    /// Load firmware for architectures that use SEC2 (Turing/Ampere/Ada).
+    pub(crate) fn new_turing_ampere_ada(
         dev: &device::Device<device::Bound>,
         sec2: &Falcon<Sec2>,
         bar: &Bar0,
@@ -233,14 +237,57 @@ impl Firmware {
         let (gsp, gsp_sigs, gsp_desc) = Self::load_gsp_firmware(dev, chipset, ver)?;
 
         Ok(Firmware {
-            booter_load: request("booter_load")
-                .and_then(|fw| Sec2Firmware::new(sec2, dev, bar, &fw))?,
-            booter_unload: request("booter_unload")
-                .and_then(|fw| Sec2Firmware::new(sec2, dev, bar, &fw))?,
+            booter_load: Some(
+                request("booter_load").and_then(|fw| Sec2Firmware::new(sec2, dev, bar, &fw))?,
+            ),
+            booter_unload: Some(
+                request("booter_unload").and_then(|fw| Sec2Firmware::new(sec2, dev, bar, &fw))?,
+            ),
             bootloader: request("bootloader").and_then(|fw| RiscvFirmware::new(dev, &fw))?,
             gsp,
             gsp_sigs,
             gsp_desc,
+            fmc: None,
+        })
+    }
+
+    /// Load firmware for architectures that do NOT use SEC2 (Hopper/Blackwell+).
+    pub(crate) fn new_hopper_blackwell_plus(
+        dev: &device::Device<device::Bound>,
+        chipset: Chipset,
+        ver: &str,
+    ) -> Result<Firmware> {
+        let request = |name| {
+            Self::firmware_path(chipset, ver, name)
+                .and_then(|path| firmware::Firmware::request(&path, dev))
+        };
+
+        let (gsp, gsp_sigs, gsp_desc) = Self::load_gsp_firmware(dev, chipset, ver)?;
+
+        let fmc = Some({
+            let fmc_fw = request("fmc")?;
+
+            // Store full FMC ELF data for signature extraction
+            let fmc_full_data = DmaObject::from_data(dev, fmc_fw.data())?;
+
+            // FSP expects only the .image section, not the entire ELF file
+            let fmc_image_data = elf_section(fmc_fw.data(), "image").ok_or_else(|| {
+                dev_err!(dev, "FMC ELF file missing 'image' section");
+                EINVAL
+            })?;
+            let fmc_image_dma = DmaObject::from_data(dev, fmc_image_data)?;
+
+            (fmc_image_dma, fmc_full_data)
+        });
+
+        Ok(Firmware {
+            booter_load: None,
+            booter_unload: None,
+            bootloader: request("bootloader").and_then(|fw| RiscvFirmware::new(dev, &fw))?,
+            gsp,
+            gsp_sigs,
+            gsp_desc,
+            fmc,
         })
     }
 }
