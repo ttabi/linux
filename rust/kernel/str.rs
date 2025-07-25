@@ -936,3 +936,354 @@ impl fmt::Debug for CString {
 macro_rules! fmt {
     ($($f:tt)*) => ( ::core::format_args!($($f)*) )
 }
+
+/// A string with fixed-size stack storage that maintains UTF-8 validity.
+///
+/// Unlike [`CString`] which uses heap allocation, [`ArrayString`] stores its content
+/// in a fixed-size array on the stack, making it suitable for kernel contexts where
+/// heap allocation should be avoided.
+///
+/// # Invariants
+///
+/// The string content is always valid UTF-8 and the length never exceeds the capacity.
+///
+/// # Examples
+///
+/// ```
+/// use kernel::{str::ArrayString, fmt};
+/// use core::fmt::Write;
+///
+/// let mut s = ArrayString::<64>::new();
+/// write!(s, "Hello, {}!", "world")?;
+/// assert_eq!(s.as_str(), "Hello, world!");
+/// assert_eq!(s.len(), 13);
+/// assert_eq!(s.capacity(), 64);
+/// # Ok::<(), kernel::error::Error>(())
+/// ```
+pub struct ArrayString<const N: usize> {
+    data: [u8; N],
+    len: usize,
+}
+
+impl<const N: usize> ArrayString<N> {
+    /// Creates a new empty [`ArrayString`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use kernel::str::ArrayString;
+    ///
+    /// let s = ArrayString::<32>::new();
+    /// assert!(s.is_empty());
+    /// assert_eq!(s.capacity(), 32);
+    /// ```
+    pub const fn new() -> Self {
+        Self {
+            data: [0; N],
+            len: 0,
+        }
+    }
+
+    /// Creates a new [`ArrayString`] from a string slice.
+    ///
+    /// Returns `EINVAL` if the string is too large to fit in the array.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use kernel::str::ArrayString;
+    ///
+    /// let s = ArrayString::<32>::try_from_str("hello")?;
+    /// assert_eq!(s.as_str(), "hello");
+    /// # Ok::<(), kernel::error::Error>(())
+    /// ```
+    pub fn try_from_str(s: &str) -> Result<Self, Error> {
+        let mut array_str = Self::new();
+        array_str.try_push_str(s)?;
+        Ok(array_str)
+    }
+
+    /// Returns the length of the string in bytes.
+    #[inline]
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Returns the capacity of the string in bytes.
+    #[inline]
+    pub const fn capacity(&self) -> usize {
+        N
+    }
+
+    /// Returns `true` if the string is empty.
+    #[inline]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Returns the remaining capacity in bytes.
+    #[inline]
+    pub const fn remaining_capacity(&self) -> usize {
+        N - self.len
+    }
+
+    /// Returns the string content as a string slice.
+    #[inline]
+    pub fn as_str(&self) -> &str {
+        // SAFETY: The type invariant guarantees the content is valid UTF-8.
+        unsafe { core::str::from_utf8_unchecked(&self.data[..self.len]) }
+    }
+
+    /// Returns the string content as a mutable string slice.
+    #[inline]
+    pub fn as_mut_str(&mut self) -> &mut str {
+        // SAFETY: The type invariant guarantees the content is valid UTF-8.
+        unsafe { core::str::from_utf8_unchecked_mut(&mut self.data[..self.len]) }
+    }
+
+    /// Returns the string content as a byte slice.
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.data[..self.len]
+    }
+
+    /// Clears the string, setting its length to zero.
+    #[inline]
+    pub fn clear(&mut self) {
+        self.len = 0;
+    }
+
+    /// Attempts to push a string slice to the end of this [`ArrayString`].
+    ///
+    /// Returns `EINVAL` if the string would exceed the capacity.
+    pub fn try_push_str(&mut self, s: &str) -> Result<(), Error> {
+        let s_bytes = s.as_bytes();
+        if s_bytes.len() > self.remaining_capacity() {
+            return Err(EINVAL);
+        }
+
+        // SAFETY: We checked that there's enough space, and the source is valid UTF-8.
+        self.data[self.len..self.len + s_bytes.len()].copy_from_slice(s_bytes);
+        self.len += s_bytes.len();
+
+        Ok(())
+    }
+
+    /// Attempts to push a character to the end of this [`ArrayString`].
+    ///
+    /// Returns `EINVAL` if the character would exceed the capacity.
+    pub fn try_push(&mut self, ch: char) -> Result<(), Error> {
+        let mut buf = [0; 4];
+        let s = ch.encode_utf8(&mut buf);
+        self.try_push_str(s)
+    }
+
+    /// Truncates the string to the specified length.
+    ///
+    /// If the specified length is greater than the current length, this has no effect.
+    /// This method ensures the truncation happens at a valid UTF-8 boundary.
+    pub fn truncate(&mut self, new_len: usize) {
+        if new_len >= self.len {
+            return;
+        }
+
+        // Find a valid UTF-8 boundary
+        let mut boundary = new_len;
+        while boundary > 0 && !self.as_str().is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+
+        self.len = boundary;
+    }
+
+    /// Removes the last character from the string and returns it.
+    ///
+    /// Returns `None` if the string is empty.
+    pub fn pop(&mut self) -> Option<char> {
+        if self.is_empty() {
+            return None;
+        }
+
+        let ch = self.as_str().chars().next_back()?;
+        let ch_len = ch.len_utf8();
+        self.len -= ch_len;
+        Some(ch)
+    }
+}
+
+impl<const N: usize> Default for ArrayString<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const N: usize> fmt::Write for ArrayString<N> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.try_push_str(s).map_err(|_| fmt::Error)
+    }
+}
+
+impl<const N: usize> fmt::Display for ArrayString<N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl<const N: usize> fmt::Debug for ArrayString<N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self.as_str(), f)
+    }
+}
+
+impl<const N: usize> Deref for ArrayString<N> {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl<const N: usize> AsRef<str> for ArrayString<N> {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl<const N: usize> AsRef<BStr> for ArrayString<N> {
+    fn as_ref(&self) -> &BStr {
+        BStr::from_bytes(self.as_bytes())
+    }
+}
+
+impl<const N: usize, const M: usize> PartialEq<ArrayString<M>> for ArrayString<N> {
+    fn eq(&self, other: &ArrayString<M>) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl<const N: usize> PartialEq<str> for ArrayString<N> {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl<const N: usize> PartialEq<&str> for ArrayString<N> {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl<const N: usize> Clone for ArrayString<N> {
+    fn clone(&self) -> Self {
+        let mut new_string = Self::new();
+        // SAFETY: We know the source is valid and within capacity.
+        new_string.data[..self.len].copy_from_slice(&self.data[..self.len]);
+        new_string.len = self.len;
+        new_string
+    }
+}
+
+#[kunit_tests(rust_kernel_str_arraystring)]
+mod arraystring_tests {
+    use super::*;
+
+    #[test]
+    fn test_arraystring_new() -> Result {
+        let s = ArrayString::<64>::new();
+        assert!(s.is_empty());
+        assert_eq!(s.len(), 0);
+        assert_eq!(s.capacity(), 64);
+        assert_eq!(s.as_str(), "");
+        Ok(())
+    }
+
+    #[test]
+    fn test_arraystring_try_from_str() -> Result {
+        let s = ArrayString::<16>::try_from_str("hello")?;
+        assert_eq!(s.as_str(), "hello");
+        assert_eq!(s.len(), 5);
+
+        // Test overflow
+        let result = ArrayString::<4>::try_from_str("hello");
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_arraystring_push_str() -> Result {
+        let mut s = ArrayString::<16>::new();
+        s.try_push_str("hello")?;
+        assert_eq!(s.as_str(), "hello");
+
+        s.try_push_str(" world")?;
+        assert_eq!(s.as_str(), "hello world");
+        assert_eq!(s.len(), 11);
+
+        // Test overflow
+        let result = s.try_push_str(" more text");
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_arraystring_push_char() -> Result {
+        let mut s = ArrayString::<8>::new();
+        s.try_push('H')?;
+        s.try_push('i')?;
+        s.try_push('!')?;
+        assert_eq!(s.as_str(), "Hi!");
+
+        // Test UTF-8 character
+        s.clear();
+        s.try_push('🦀')?;
+        assert_eq!(s.as_str(), "🦀");
+        assert_eq!(s.len(), 4); // 🦀 is 4 bytes in UTF-8
+        Ok(())
+    }
+
+    #[test]
+    fn test_arraystring_write_trait() -> Result {
+        let mut s = ArrayString::<32>::new();
+        write!(s, "Hello, {}!", "world")?;
+        assert_eq!(s.as_str(), "Hello, world!");
+        Ok(())
+    }
+
+    #[test]
+    fn test_arraystring_pop() -> Result {
+        let mut s = ArrayString::<16>::try_from_str("hello")?;
+        assert_eq!(s.pop(), Some('o'));
+        assert_eq!(s.as_str(), "hell");
+
+        s.clear();
+        assert_eq!(s.pop(), None);
+        Ok(())
+    }
+
+    #[test]
+    fn test_arraystring_truncate() -> Result {
+        let mut s = ArrayString::<16>::try_from_str("hello world")?;
+        s.truncate(5);
+        assert_eq!(s.as_str(), "hello");
+
+        // Test UTF-8 boundary handling
+        s.clear();
+        s.try_push_str("🦀🐧")?; // Each emoji is 4 bytes
+        s.truncate(5); // Should truncate to 4 to maintain UTF-8 boundary
+        assert_eq!(s.as_str(), "🦀");
+        Ok(())
+    }
+
+    #[test]
+    fn test_arraystring_equality() -> Result {
+        let s1 = ArrayString::<16>::try_from_str("hello")?;
+        let s2 = ArrayString::<32>::try_from_str("hello")?;
+        let s3 = ArrayString::<16>::try_from_str("world")?;
+
+        assert_eq!(s1, s2);
+        assert_ne!(s1, s3);
+        assert_eq!(s1, "hello");
+        assert_eq!(s1.as_str(), "hello");
+        Ok(())
+    }
+}
