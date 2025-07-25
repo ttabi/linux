@@ -12,6 +12,7 @@ use kernel::dma::CoherentAllocation;
 use kernel::pci;
 use kernel::pr_info;
 use kernel::prelude::*;
+use kernel::str::ArrayString;
 use kernel::time::Delta;
 use kernel::transmute::{AsBytes, FromBytes};
 use kernel::{dma_read, dma_write};
@@ -104,7 +105,7 @@ impl GspMessageElement for GspSequencerInfo {
 }
 
 pub(crate) struct GspStaticConfigInfo {
-    pub gpu_name: [u8; 40],
+    pub gpu_name: ArrayString<40>,
 }
 
 impl GspMessageElement for GspStaticConfigInfo {
@@ -125,11 +126,8 @@ impl GspMessageElement for GspStaticConfigInfo {
                 .unwrap_or("invalid utf8")
         };
 
-        let mut gpu_name = [0u8; 40];
-        let bytes = gpu_name_str.as_bytes();
-        let copy_len = core::cmp::min(bytes.len(), gpu_name.len());
-        gpu_name[..copy_len].copy_from_slice(&bytes[..copy_len]);
-        gpu_name[copy_len] = b'\0';
+        let gpu_name = ArrayString::try_from_str(gpu_name_str)
+            .unwrap_or_else(|_| ArrayString::try_from_str("invalid").unwrap());
 
         Ok(GspStaticConfigInfo { gpu_name })
     }

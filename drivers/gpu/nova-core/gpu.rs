@@ -476,11 +476,7 @@ impl Gpu {
         libos.cmdq.gsp_init_done(Delta::from_secs(10))?;
         libos.cmdq.get_gsp_info()?;
         let info = libos.cmdq.get_gsp_info()?;
-        dev_info!(
-            pdev.as_ref(),
-            "GPU name: {}\n",
-            util::str_from_null_terminated(&info.gpu_name)
-        );
+        dev_info!(pdev.as_ref(), "GPU name: {}\n", info.gpu_name.as_str());
 
         // TODO: Figure out how to convince the compiler that the lifetime
         // parameter on GspMemObjects is satisfied when we pass it to
