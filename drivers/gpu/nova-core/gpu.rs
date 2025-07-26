@@ -356,12 +356,11 @@ impl Gpu {
         let gsp_falcon = Falcon::<Gsp>::new(
             pdev.as_ref(),
             spec.chipset,
-            bar,
             spec.chipset > Chipset::GA100,
         )?;
         gsp_falcon.clear_swgen0_intr(bar);
 
-        let sec2_falcon = Falcon::<Sec2>::new(pdev.as_ref(), spec.chipset, bar, true)?;
+        let sec2_falcon = Falcon::<Sec2>::new(pdev.as_ref(), spec.chipset, true)?;
 
         let fw = Firmware::new(
             pdev.as_ref(),
