@@ -334,18 +334,10 @@ pub(crate) struct Falcon<E: FalconEngine> {
 
 impl<E: FalconEngine + 'static> Falcon<E> {
     /// Create a new falcon instance.
-    ///
-    /// `need_riscv` is set to `true` if the caller expects the falcon to be a dual falcon/riscv
-    /// controller.
     pub(crate) fn new(
         dev: &device::Device,
         chipset: Chipset,
-        need_riscv: bool,
     ) -> Result<Self> {
-        if need_riscv {
-            // Note: bar parameter removed, will need to be passed in later for RISCV validation
-            // For now, skip the RISCV validation to make this commit compile
-        }
 
         Ok(Self {
             hal: hal::falcon_hal(chipset)?,
