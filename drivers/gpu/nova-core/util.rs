@@ -60,6 +60,11 @@ pub(crate) fn wait_on_result<R, F: FnMut() -> Option<Result<R>>>(
         if start_time.elapsed().as_nanos() > timeout.as_nanos() {
             return Err(ETIMEDOUT);
         }
+
+        // Add 1ms delay between polls to match Nouveau's approach
+        // This prevents aggressive polling that can disrupt GSP firmware timing
+        // SAFETY: msleep() is safe to call with any parameter
+        unsafe { kernel::bindings::msleep(1) };
     }
 }
 
