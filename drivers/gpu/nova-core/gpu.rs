@@ -380,7 +380,8 @@ impl Gpu {
         spec: &Spec,
     ) -> Result<(FbLayout, CoherentAllocation<fw::GspFwWprMeta>)> {
         let fb_layout = FbLayout::new(spec.chipset, bar, fw)?;
-        dev_dbg!(pdev.as_ref(), "{:#x?}\n", fb_layout);
+
+        dev_dbg!(pdev.as_ref(), "{:#?}\n", fb_layout);
 
         let wpr_meta = gsp::build_wpr_meta(pdev.as_ref(), fw, &fb_layout)?;
 
