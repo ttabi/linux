@@ -509,22 +509,30 @@ impl<'a> GspCmdq<'a> {
             SBuffer::new((slice_1, Some(slice_2)))?
         };
 
+        // Always advance the read pointer, regardless of message processing result
+        let advance_result = (|| -> Result<()> {
+            let mut rptr = self.cpu_rptr()?;
+            rptr = rptr + (header_size + rpc.length).div_ceil(GSP_PAGE_SIZE as u32);
+            rptr %= 0x3f;
+
+            // TODO: Figure out Rust barriers
+            unsafe {
+                asm!("mfence";);
+                dma_write!(self.gsp_mem[0].cpuq.rx.read_ptr = rptr)?;
+            };
+            Ok(())
+        })();
+
+        // Process the message
         let result = if rpc.function == function {
             Ok(A::new_from_sbuf(&sbuf)?)
         } else {
             Err(ERANGE)
         };
 
-        let mut rptr = self.cpu_rptr()?;
-        rptr = rptr + (header_size + rpc.length).div_ceil(GSP_PAGE_SIZE as u32);
-        rptr %= 0x3f;
-
-        // TODO: Figure out Rust barriers
-        unsafe {
-            asm!("mfence";);
-            dma_write!(self.gsp_mem[0].cpuq.rx.read_ptr = rptr)?;
-        };
-
+        // If pointer advancement failed, return that error instead
+        // This ensures we don't get stuck on the same message
+        advance_result?;
         result
     }
 
