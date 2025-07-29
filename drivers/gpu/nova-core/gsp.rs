@@ -229,12 +229,13 @@ pub(crate) struct GspCmdq<'a> {
     sec2_falcon: &'a Falcon<Sec2>,
     libos_dma_handle: u64,
     fw: &'a Firmware,
+    dev: &'a device::Device<device::Bound>,
 }
 
 impl<'a> GspCmdq<'a> {
     // This is equivalent to gsp_shared_init()
     fn new(
-        dev: &device::Device<device::Bound>,
+        dev: &'a device::Device<device::Bound>,
         bar: &'a Devres<Bar0>,
         gsp_falcon: &'a Falcon<Gsp>,
         sec2_falcon: &'a Falcon<Sec2>,
@@ -282,6 +283,7 @@ impl<'a> GspCmdq<'a> {
             sec2_falcon,
             libos_dma_handle,
             fw,
+            dev,
         })
     }
 
@@ -429,6 +431,17 @@ impl<'a> GspCmdq<'a> {
         let total_size = sbuf.total_bytes;
         msg_header.elem_count = total_size.div_ceil(GSP_PAGE_SIZE) as u32;
 
+        // Log RPC send with message type decoding
+        dev_dbg!(
+            self.dev,
+            "NovaCore: send: Call {} - used_pages={}, function=0x{:x} ({}), header_size={}\n",
+            self.seq - 1,
+            msg_header.elem_count,
+            function,
+            decode_gsp_function(function),
+            size_of::<GspMsgHeader>() + size_of::<GspRpcHeader>()
+        );
+
         // Calculate checksum over the entire message
         msg_header.checksum = GspCmdq::calculate_checksum(&sbuf);
 
@@ -487,6 +500,17 @@ impl<'a> GspCmdq<'a> {
         // rpc.length includes the size of the GspRpcHeader. Remove it to make
         // the rest of the code a bit easier to follow.
         rpc.length -= size_of::<GspRpcHeader>() as u32;
+
+        // Log RPC receive with message type decoding
+        dev_dbg!(
+            self.dev,
+            "NovaCore: receive: Call {} - used_pages={}, function=0x{:x} ({}), header_size={}\n",
+            rpc.sequence,
+            used_pages,
+            rpc.function,
+            decode_gsp_function(rpc.function),
+            header_size
+        );
 
         // Not all pages of the message have made it to the queue so bail and let the caller retry.
         if used_pages << GSP_PAGE_SHIFT < header_size + rpc.length {
@@ -931,7 +955,7 @@ fn create_coherent_dma_object<A: AsBytes + FromBytes>(
 
 impl<'a> GspMemObjects<'a> {
     pub(crate) fn new(
-        pdev: &pci::Device<device::Bound>,
+        pdev: &'a pci::Device<device::Bound>,
         bar: &'a Devres<Bar0>,
         gsp_falcon: &'a Falcon<Gsp>,
         sec2_falcon: &'a Falcon<Sec2>,
@@ -969,5 +993,44 @@ impl<'a> GspMemObjects<'a> {
             rmargs,
             cmdq,
         })
+    }
+}
+
+/// Decode GSP function code to human-readable message type name
+fn decode_gsp_function(function: u32) -> &'static str {
+    match function {
+        // Common function codes
+        fw::NV_VGPU_MSG_FUNCTION_NOP => "NOP",
+        fw::NV_VGPU_MSG_FUNCTION_SET_GUEST_SYSTEM_INFO => "SET_GUEST_SYSTEM_INFO",
+        fw::NV_VGPU_MSG_FUNCTION_ALLOC_ROOT => "ALLOC_ROOT",
+        fw::NV_VGPU_MSG_FUNCTION_ALLOC_DEVICE => "ALLOC_DEVICE",
+        fw::NV_VGPU_MSG_FUNCTION_ALLOC_MEMORY => "ALLOC_MEMORY",
+        fw::NV_VGPU_MSG_FUNCTION_ALLOC_CTX_DMA => "ALLOC_CTX_DMA",
+        fw::NV_VGPU_MSG_FUNCTION_ALLOC_CHANNEL_DMA => "ALLOC_CHANNEL_DMA",
+        fw::NV_VGPU_MSG_FUNCTION_MAP_MEMORY => "MAP_MEMORY",
+        fw::NV_VGPU_MSG_FUNCTION_BIND_CTX_DMA => "BIND_CTX_DMA",
+        fw::NV_VGPU_MSG_FUNCTION_ALLOC_OBJECT => "ALLOC_OBJECT",
+        fw::NV_VGPU_MSG_FUNCTION_FREE => "FREE",
+        fw::NV_VGPU_MSG_FUNCTION_LOG => "LOG",
+        fw::NV_VGPU_MSG_FUNCTION_GET_GSP_STATIC_INFO => "GET_GSP_STATIC_INFO",
+        fw::NV_VGPU_MSG_FUNCTION_SET_REGISTRY => "SET_REGISTRY",
+        fw::NV_VGPU_MSG_FUNCTION_GSP_SET_SYSTEM_INFO => "GSP_SET_SYSTEM_INFO",
+        fw::NV_VGPU_MSG_FUNCTION_GSP_INIT_POST_OBJGPU => "GSP_INIT_POST_OBJGPU",
+        fw::NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL => "GSP_RM_CONTROL",
+        fw::NV_VGPU_MSG_FUNCTION_GET_STATIC_INFO => "GET_STATIC_INFO",
+
+        // Event codes
+        fw::NV_VGPU_MSG_EVENT_GSP_INIT_DONE => "INIT_DONE",
+        fw::NV_VGPU_MSG_EVENT_GSP_RUN_CPU_SEQUENCER => "RUN_CPU_SEQUENCER",
+        fw::NV_VGPU_MSG_EVENT_POST_EVENT => "POST_EVENT",
+        fw::NV_VGPU_MSG_EVENT_RC_TRIGGERED => "RC_TRIGGERED",
+        fw::NV_VGPU_MSG_EVENT_MMU_FAULT_QUEUED => "MMU_FAULT_QUEUED",
+        fw::NV_VGPU_MSG_EVENT_OS_ERROR_LOG => "OS_ERROR_LOG",
+        fw::NV_VGPU_MSG_EVENT_GSP_POST_NOCAT_RECORD => "NOCAT",
+        fw::NV_VGPU_MSG_EVENT_GSP_LOCKDOWN_NOTICE => "LOCKDOWN_NOTICE",
+        fw::NV_VGPU_MSG_EVENT_UCODE_LIBOS_PRINT => "LIBOS_PRINT",
+
+        // Default for unknown codes
+        _ => "UNKNOWN",
     }
 }
