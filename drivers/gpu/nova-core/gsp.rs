@@ -633,7 +633,7 @@ impl<'a> GspCmdq<'a> {
                 size: size_of::<fw::GspStaticConfigInfo_t>(),
             },
         )?;
-        self.receive_wait::<GspStaticConfigInfo>(
+        self.receive_wait_ignore::<GspStaticConfigInfo>(
             Delta::from_secs(5),
             fw::NV_VGPU_MSG_FUNCTION_GET_GSP_STATIC_INFO,
         )
