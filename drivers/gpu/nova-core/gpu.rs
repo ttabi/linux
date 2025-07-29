@@ -4,13 +4,13 @@ use kernel::dma::CoherentAllocation;
 use kernel::{c_str, device, devres::Devres, error::code::*, pci, prelude::*, time::Delta};
 
 use crate::driver::Bar0;
-use crate::falcon::{gsp::Gsp, sec2::Sec2, Falcon};
+use crate::falcon::{fsp::Fsp as FspEngine, gsp::Gsp, sec2::Sec2, Falcon, FalconEngine};
 use crate::fb::FbLayout;
 use crate::fb::SysmemFlush;
 use crate::firmware::fwsec::{FwsecCommand, FwsecFirmware};
 use crate::firmware::{Firmware, FIRMWARE_VERSION};
 use crate::gfw;
-use crate::gsp::{self, GspMemObjects};
+use crate::gsp;
 use crate::nvfw::r570_144 as fw;
 use crate::regs;
 use crate::util;
@@ -124,7 +124,7 @@ impl fmt::Display for Chipset {
 }
 
 /// Enum representation of the GPU generation.
-#[derive(fmt::Debug)]
+#[derive(fmt::Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Architecture {
     Turing = 0x16,
     Ampere = 0x17,
@@ -204,8 +204,6 @@ pub(crate) struct Gpu {
     /// PCIE into system memory, via sysmembar (A GPU-initiated HW memory-barrier operation).
     sysmem_flush: SysmemFlush,
     wpr_meta: CoherentAllocation<fw::GspFwWprMeta>,
-    libos: GspMemObjects,
-    gsp_info: gsp::GspStaticConfigInfo,
 }
 
 #[pinned_drop]
@@ -221,7 +219,7 @@ impl Gpu {
     /// Initialize debugfs for Nova GPU driver.
     ///
     /// Creates the debugfs directory and log files for GSP debugging.
-    fn init_debugfs(libos: &crate::gsp::GspMemObjects) {
+    fn init_debugfs(libos: &crate::gsp::GspMemObjects<'_>) {
         // debugfs files for GSP log
         unsafe {
             if (*core::ptr::addr_of!(NOVA_DEBUGFS)).is_none() {
@@ -338,6 +336,35 @@ impl Gpu {
         }
     }
 
+    /// Helper function to run SEC2 booter_load firmware.
+    ///
+    /// Loads and executes the SEC2 booter_load firmware with the WPR metadata handle.
+    /// This is used by Turing/Ampere/Ada architectures that require SEC2-based booting.
+    fn run_sec2_booter_load(
+        dev: &device::Device<device::Bound>,
+        sec2_falcon: &Falcon<Sec2>,
+        bar: &Bar0,
+        fw: &Firmware,
+        wpr_handle: u64,
+    ) -> Result<()> {
+        dev_info!(
+            dev,
+            "Using SEC2 to load and run the booter_load firmware...\n"
+        );
+
+        sec2_falcon.reset(bar)?;
+        let booter_load = fw.booter_load.as_ref().ok_or(EINVAL)?;
+        sec2_falcon.dma_load(bar, booter_load)?;
+        let (mbox0, mbox1) = sec2_falcon.boot(
+            bar,
+            Some(wpr_handle as u32),
+            Some((wpr_handle >> 32) as u32),
+        )?;
+        dev_info!(dev, "SEC2 MBOX0: {:#x}, MBOX1: {:#x}\n", mbox0, mbox1);
+
+        Ok(())
+    }
+
     fn get_firmware_arch_group(arch: Architecture) -> FirmwareArchGroup {
         match arch {
             Architecture::Turing | Architecture::Ampere | Architecture::Ada => {
@@ -348,32 +375,248 @@ impl Gpu {
         }
     }
 
+    fn wait_for_riscv_active(
+        pdev: &pci::Device<device::Bound>,
+        gsp_falcon: &Falcon<Gsp>,
+        bar: &Bar0,
+        app_version: u32,
+    ) -> Result<(), Error> {
+        gsp_falcon.write_os_version(bar, app_version)?;
+
+        dev_info!(
+            pdev.as_ref(),
+            "Waiting for RISC-V core to become active...\n"
+        );
+
+        util::wait_on(Delta::from_secs(5), || {
+            if gsp_falcon.is_riscv_active(bar).unwrap_or(false) {
+                Some(())
+            } else {
+                None
+            }
+        })
+        .inspect_err(|_| {
+            dev_err!(
+                pdev.as_ref(),
+                "Timeout waiting for RISC-V core to become active\n"
+            );
+        })?;
+
+        dev_info!(pdev.as_ref(), "RISC-V core confirmed active\n");
+        Ok(())
+    }
+
+    /// Execute FSP Chain of Trust setup and boot sequence.
+    ///
+    /// This handles the FSP Chain of Trust initialization:
+    /// 1. FMC firmware verification and signature extraction
+    /// 2. FSP secure boot wait and falcon creation
+    /// 3. FMC boot params creation and FSP execution
+    /// 4. Success confirmation
+    fn execute_fsp_chain_of_trust(
+        pdev: &pci::Device<device::Bound>,
+        bar: &Bar0,
+        spec: &Spec,
+        fw: &Firmware,
+        fb_layout: &crate::fb::FbLayout,
+        wpr_meta: &CoherentAllocation<fw::GspFwWprMeta>,
+        libos_handle: u64,
+    ) -> Result<u64> {
+        dev_info!(
+            pdev.as_ref(),
+            "Hopper/Blackwell: Executing FSP Chain of Trust\n"
+        );
+
+        // Verify FMC firmware is loaded
+        let (fmc_image_fw, fmc_full_fw) = fw
+            .fmc
+            .as_ref()
+            .ok_or(EINVAL)
+            .inspect_err(|e| dev_err!(pdev.as_ref(), "FMC firmware not loaded: {e:?}"))?;
+
+        // Wait for FSP to complete its initial secure boot process
+        dev_info!(
+            pdev.as_ref(),
+            "Waiting for FSP initial secure boot completion\n"
+        );
+        crate::fsp::Fsp::wait_secure_boot(pdev.as_ref(), bar, spec.chipset.arch())
+            .inspect_err(|e| dev_err!(pdev.as_ref(), "FSP initial secure boot failed: {e:?}"))?;
+
+        // Create FSP falcon for Chain of Trust communication
+        let fsp_falcon = Falcon::<FspEngine>::new(pdev.as_ref(), spec.chipset)?;
+
+        // Create FMC boot parameters structure (what FSP actually expects!)
+        let fmc_boot_params = crate::fsp::Fsp::create_fmc_boot_params(
+            pdev.as_ref(),
+            wpr_meta.dma_handle(),
+            core::mem::size_of::<fw::GspFwWprMeta>() as u32, // Fixed 256 bytes like Nouveau
+            libos_handle,
+        )
+        .inspect_err(|e| dev_err!(pdev.as_ref(), "Failed to create FMC boot params: {e:?}"))?;
+
+        // Extract FMC signatures from full ELF data BEFORE boot
+        let fmc_full_data =
+            unsafe { core::slice::from_raw_parts(fmc_full_fw.start_ptr(), fmc_full_fw.size()) };
+        let signatures =
+            crate::fsp::Fsp::extract_fmc_signatures_static(pdev.as_ref(), fmc_full_data)?;
+
+        // Execute FSP Chain of Trust with FMC image data and pre-extracted signatures
+        dev_info!(
+            pdev.as_ref(),
+            "Executing FSP Chain of Trust with FMC boot params: {:#x}\n",
+            fmc_boot_params.dma_handle()
+        );
+        crate::fsp::Fsp::boot_gsp_fmc_with_signatures(
+            pdev.as_ref(),
+            bar,
+            spec.chipset,
+            fmc_image_fw,
+            &fmc_boot_params,
+            fb_layout.rsvd_size as u64,
+            false,
+            &fsp_falcon,
+            &signatures, // Pre-extracted signatures
+        )
+        .inspect_err(|e| dev_err!(pdev.as_ref(), "Failed to execute FSP Chain of Trust: {e:?}"))?;
+
+        dev_info!(
+            pdev.as_ref(),
+            "FSP Chain of Trust with pre-extracted signatures completed successfully\n"
+        );
+
+        Ok(fmc_boot_params.dma_handle())
+    }
+
+    /// Wait for GSP lockdown to be released after FSP Chain of Trust.
+    ///
+    /// This exactly matches Nouveau's gh100_gsp_lockdown_released() logic and calling pattern
+    fn gsp_lockdown_released(
+        pdev: &pci::Device<device::Bound>,
+        gsp_falcon: &Falcon<Gsp>,
+        bar: &Bar0,
+        fmc_boot_params_addr: u64,
+        mbox0: &mut u32,
+    ) -> bool {
+        // Read GSP falcon mailbox0 (exactly like Nouveau)
+        *mbox0 = match gsp_falcon.read_mailbox0(bar) {
+            Ok(val) => val,
+            Err(_) => return false, // Still inaccessible
+        };
+
+        // Check 1: If mbox0 has 0xbadf4100 pattern, GSP is still locked down
+        if *mbox0 != 0 && (*mbox0 & 0xffffff00) == 0xbadf4100 {
+            return false;
+        }
+
+        // Check 2: If mbox0 has a value, check if it's an error (EXACTLY like Nouveau)
+        if *mbox0 != 0 {
+            let mbox1 = match gsp_falcon.read_mailbox1(bar) {
+                Ok(val) => val,
+                Err(_) => return false, // Still inaccessible
+            };
+
+            let combined_addr = ((mbox1 as u64) << 32) | (*mbox0 as u64);
+            if combined_addr != fmc_boot_params_addr {
+                // Address doesn't match - GSP wrote an error code
+                // Return TRUE (lockdown released) with error - EXACTLY like Nouveau
+                dev_dbg!(pdev.as_ref(),
+                    "GSP lockdown released with error: mbox0={:#x}, combined_addr={:#x}, expected={:#x}",
+                    *mbox0, combined_addr, fmc_boot_params_addr);
+                return true;
+            }
+        }
+
+        // Check 3: Verify HWCFG2 RISCV_BR_PRIV_LOCKDOWN bit is clear (exactly like Nouveau)
+        let hwcfg2 =
+            crate::regs::NV_PFALCON_FALCON_HWCFG2::read(bar, crate::falcon::gsp::Gsp::BASE);
+        !hwcfg2.riscv_br_priv_lockdown()
+    }
+
+    fn wait_for_gsp_lockdown_release(
+        pdev: &pci::Device<device::Bound>,
+        bar: &Bar0,
+        gsp_falcon: &Falcon<Gsp>,
+        fmc_boot_params_addr: u64,
+    ) -> Result<u32> {
+        dev_info!(pdev.as_ref(), "Waiting for GSP lockdown release\n");
+
+        let mut mbox0: u32 = 0;
+
+        // Use Nova's wait_on_result with 4000ms timeout to match Nouveau's 4000 iterations
+        util::wait_on_result(Delta::from_millis(4000), || {
+            if Self::gsp_lockdown_released(pdev, gsp_falcon, bar, fmc_boot_params_addr, &mut mbox0)
+            {
+                Some(Ok(mbox0)) // Lockdown released (with or without error)
+            } else {
+                None // Still waiting
+            }
+        })
+        .inspect_err(|_| {
+            dev_err!(pdev.as_ref(), "GSP lockdown release timeout\n");
+        })
+        .and_then(|mbox0| {
+            // EXACTLY like Nouveau: check mbox0 for error after wait completion
+            if mbox0 != 0 {
+                dev_err!(pdev.as_ref(), "GSP-FMC boot failed (mbox: {:#x})\n", mbox0);
+                Err(EIO)
+            } else {
+                dev_info!(
+                    pdev.as_ref(),
+                    "GSP hardware lockdown fully released, proceeding with initialization\n"
+                );
+                Ok(mbox0)
+            }
+        })
+    }
+
+    /// Complete GSP initialization sequence after runtime is ready.
+    ///
+    /// This handles the common sequence after GSP runtime is ready:
+    /// 1. Initialize debugfs for GSP debugging
+    /// 2. Complete GSP initialization (init_done, info)
+    ///
+    /// For Hopper/Blackwell: GSP sends messages directly (no sequencer needed).
+    /// For Turing/Ampere/Ada: Messages come after sequencer completion.
+    fn wait_for_gsp_init_done(
+        pdev: &pci::Device<device::Bound>,
+        libos: &mut crate::gsp::GspMemObjects<'_>,
+    ) -> Result<()> {
+        // Initialize debugfs for GSP debugging
+        Self::init_debugfs(&libos);
+
+        dev_info!(pdev.as_ref(), "Waiting for GSP INIT_DONE message...\n");
+
+        // Wait for GSP_INIT_DONE - this will automatically handle and dump other messages
+        // that come before it via the receive_wait_ignore mechanism
+        libos
+            .cmdq
+            .gsp_init_done(pdev.as_ref(), Delta::from_secs(10))?;
+
+        dev_info!(pdev.as_ref(), "GSP INIT_DONE message received!\n");
+
+        Ok(())
+    }
+
     /// Architecture-specific initialization and GSP boot for Turing, Ampere, and Ada GPUs.
     fn turing_ampere_ada_init_and_boot(
         pdev: &pci::Device<device::Bound>,
         devres_bar: &Devres<Bar0>,
         spec: &Spec,
-    ) -> Result<(
-        Firmware,
-        SysmemFlush,
-        CoherentAllocation<fw::GspFwWprMeta>,
-        GspMemObjects,
-        gsp::GspStaticConfigInfo,
-    )> {
+    ) -> Result<(Firmware, SysmemFlush, CoherentAllocation<fw::GspFwWprMeta>)> {
         let bar = devres_bar.access(pdev.as_ref())?;
 
-        // We must wait for GFW_BOOT completion before doing any significant setup on the GPU.
+        // Wait for GFW_BOOT completion before doing any significant setup on the GPU.
         gfw::wait_gfw_boot_completion(bar)
             .inspect_err(|_| dev_err!(pdev.as_ref(), "GFW boot did not complete"))?;
 
-        let sysmem_flush = SysmemFlush::register(pdev.as_ref(), bar, spec.chipset)?;
+        let sysmem_flush = Self::create_sysmem_flush(pdev, bar, spec)?;
 
-        let gsp_falcon = Falcon::<Gsp>::new(pdev.as_ref(), spec.chipset)?;
-        gsp_falcon.clear_swgen0_intr(bar);
+        let gsp_falcon = Self::create_gsp_falcon(pdev, bar, spec)?;
 
         let sec2_falcon = Falcon::<Sec2>::new(pdev.as_ref(), spec.chipset)?;
 
-        let fw = Firmware::new(
+        // Create firmware using SEC2 falcon
+        let fw = Firmware::new_turing_ampere_ada(
             pdev.as_ref(),
             &sec2_falcon,
             bar,
@@ -381,16 +624,13 @@ impl Gpu {
             FIRMWARE_VERSION,
         )?;
 
-        let fb_layout = FbLayout::new(spec.chipset, bar, &fw)?;
-        dev_dbg!(pdev.as_ref(), "{:#?}\n", fb_layout);
-
+        let (fb_layout, wpr_meta) = Self::setup_wpr_metadata(pdev, bar, &fw, spec)?;
         let bios = Vbios::new(pdev, bar)?;
-
         Self::run_fwsec_frts(pdev.as_ref(), &gsp_falcon, bar, &bios, &fb_layout)?;
 
-        let mut libos = gsp::GspMemObjects::new(pdev, bar)?;
-        let libos_handle = libos.libos_dma_handle();
-        let wpr_meta = gsp::build_wpr_meta(pdev.as_ref(), &fw, &fb_layout)?;
+        let mut libos =
+            gsp::GspMemObjects::new(pdev, &devres_bar, &gsp_falcon, Some(&sec2_falcon), &fw)?;
+        let libos_handle = libos.libos.dma_handle();
         let wpr_handle = wpr_meta.dma_handle();
 
         gsp_falcon.reset(&bar)?;
@@ -406,110 +646,128 @@ impl Gpu {
             mbox1
         );
 
-        dev_info!(
-            pdev.as_ref(),
-            "Using SEC2 to load and run the booter_load firmware...\n"
-        );
+        Self::run_sec2_booter_load(pdev.as_ref(), &sec2_falcon, bar, &fw, wpr_handle)?;
 
-        sec2_falcon.reset(&bar)?;
-        sec2_falcon.dma_load(&bar, &fw.booter_load)?;
-        let (mbox0, mbox1) = sec2_falcon.boot(
-            &bar,
-            Some(wpr_handle as u32),
-            Some((wpr_handle >> 32) as u32),
-        )?;
-        dev_info!(
-            pdev.as_ref(),
-            "SEC2 MBOX0: {:#x}, MBOX1{:#x}\n",
-            mbox0,
-            mbox1
-        );
+        Self::wait_for_riscv_active(pdev, &gsp_falcon, bar, fw.gsp_desc.app_version())?;
 
-        // Match what Nouveau does here:
-        gsp_falcon.write_os_version(&bar, fw.gsp_desc.app_version())?;
+        // Run CPU sequencer for Turing/Ampere/Ada (SEC2-based architectures)
+        libos.cmdq.run_sequencer(Delta::from_secs(10))?;
 
-        // Poll for RISC-V to become active before running sequencer
-        util::wait_on(Delta::from_secs(5), || {
-            if gsp_falcon.is_riscv_active(&bar).unwrap_or(false) {
-                Some(())
-            } else {
-                None
-            }
-        })?;
+        Self::wait_for_gsp_init_done(pdev, &mut libos)?;
 
-        dev_info!(
-            pdev.as_ref(),
-            "RISC-V active? {}\n",
-            gsp_falcon.is_riscv_active(&bar)?,
-        );
-
-        Self::init_debugfs(&libos);
-        let libos_dma_handle = libos.libos_dma_handle();
-
-        // Create and run the GSP sequencer
-        match gsp::sequencer::GspSequencer::new(
-            &mut libos.cmdq,
-            &fw,
-            libos_dma_handle,
-            &gsp_falcon,
-            &sec2_falcon,
-            pdev.as_ref(),
-            &bar,
-            Delta::from_secs(10),
-        ) {
-            Ok(sequencer) => {
-                if let Err(e) = sequencer.run() {
-                    pr_err!("Error running CPU sequencer: {:?}\n", e);
-                    return Err(e);
-                }
-            }
-            Err(e) => {
-                pr_err!("Error creating CPU sequencer: {:?}\n", e);
-                return Err(e);
-            }
-        }
-
-        libos
-            .cmdq
-            .gsp_init_done(pdev.as_ref(), Delta::from_secs(10))?;
-
-        let gsp_info = libos.cmdq.get_gsp_info(pdev.as_ref(), bar)?;
-
+        // For Turing/Ampere/Ada: get GPU info after INIT_DONE
+        let info = libos.cmdq.get_gsp_info(pdev.as_ref(), bar)?;
         dev_info!(
             pdev.as_ref(),
             "GPU name: {}\n",
-            util::str_from_null_terminated(&gsp_info.gpu_name)
-        );
-        dev_info!(
-            pdev.as_ref(),
-            "FB regions: {} usable regions found\n",
-            gsp_info.fb_region_count
-        );
-        for (i, region) in gsp_info.fb_regions.iter().enumerate() {
-            dev_info!(
-                pdev.as_ref(),
-                "  Region {}: addr={:#x} size={:#x} ({} MB)\n",
-                i,
-                region.addr,
-                region.size,
-                region.size / (1024 * 1024)
-            );
-        }
-        dev_info!(
-            pdev.as_ref(),
-            "BAR page directories: BAR1_PDB={:#x} BAR2_PDB={:#x}\n",
-            gsp_info.bar1_pdb,
-            gsp_info.bar2_pdb
-        );
-        dev_dbg!(
-            pdev.as_ref(),
-            "GSP Handles: Client={:#x}, Device={:#x}, Subdevice={:#x}\n",
-            gsp_info.h_internal_client,
-            gsp_info.h_internal_device,
-            gsp_info.h_internal_subdevice
+            util::str_from_null_terminated(&info.gpu_name)
         );
 
-        Ok((fw, sysmem_flush, wpr_meta, libos, gsp_info))
+        // TODO: Figure out how to convince the compiler that the lifetime
+        // parameter on GspMemObjects is satisfied when we pass it to
+        // pin_init below. For now we just leak the memory, which is not good
+        // but is better than a use-after-free.
+        core::mem::forget(libos);
+
+        Ok((fw, sysmem_flush, wpr_meta))
+    }
+
+    /// Architecture-specific initialization and GSP boot for Hopper, Blackwell, and later GPUs.
+    fn hopper_blackwell_plus_init_and_boot(
+        pdev: &pci::Device<device::Bound>,
+        devres_bar: &Devres<Bar0>,
+        spec: &Spec,
+    ) -> Result<(Firmware, SysmemFlush, CoherentAllocation<fw::GspFwWprMeta>)> {
+        let bar = devres_bar.access(pdev.as_ref())?;
+
+        let sysmem_flush = Self::create_sysmem_flush(pdev, bar, spec)?;
+
+        let fw = Firmware::new_hopper_blackwell_plus(pdev.as_ref(), spec.chipset, FIRMWARE_VERSION)
+            .inspect_err(|e| dev_err!(pdev.as_ref(), "Failed to create firmware: {e:?}"))?;
+
+        let (fb_layout, wpr_meta) = Self::setup_wpr_metadata(pdev, bar, &fw, spec)
+            .inspect_err(|e| dev_err!(pdev.as_ref(), "Failed to create memory objects: {e:?}"))?;
+
+        let gsp_falcon = Self::create_gsp_falcon(pdev, bar, spec)
+            .inspect_err(|e| dev_err!(pdev.as_ref(), "Failed to create GSP falcon: {e:?}"))?;
+
+        let mut libos = gsp::GspMemObjects::new(pdev, devres_bar, &gsp_falcon, None, &fw)
+            .inspect_err(|e| {
+                dev_err!(pdev.as_ref(), "Failed to create GSP memory objects: {e:?}")
+            })?;
+        let libos_handle = libos.libos.dma_handle();
+
+        let fmc_boot_params_addr = Self::execute_fsp_chain_of_trust(
+            pdev,
+            bar,
+            spec,
+            &fw,
+            &fb_layout,
+            &wpr_meta,
+            libos_handle,
+        )?;
+
+        let _mbox0 =
+            Self::wait_for_gsp_lockdown_release(pdev, bar, &gsp_falcon, fmc_boot_params_addr)?;
+
+        Self::wait_for_riscv_active(pdev, &gsp_falcon, bar, fw.gsp_desc.app_version())?;
+
+        Self::wait_for_gsp_init_done(pdev, &mut libos)?;
+
+        // For Hopper/Blackwell: get GPU info after INIT_DONE (no message cleanup needed)
+        let info = libos.cmdq.get_gsp_info(pdev.as_ref(), bar)?;
+        dev_info!(
+            pdev.as_ref(),
+            "GPU name: {}\n",
+            util::str_from_null_terminated(&info.gpu_name)
+        );
+
+        dev_info!(
+            pdev.as_ref(),
+            "Hopper/Blackwell+ firmware initialization complete\n"
+        );
+
+        // TODO: Figure out how to convince the compiler that the lifetime
+        // parameter on GspMemObjects is satisfied when we pass it to
+        // pin_init below. For now we just leak the memory, which is not good
+        // but is better than a use-after-free.
+        core::mem::forget(libos);
+
+        Ok((fw, sysmem_flush, wpr_meta))
+    }
+
+    /// Create a SysmemFlush object for memory coherency management.
+    fn create_sysmem_flush(
+        pdev: &pci::Device<device::Bound>,
+        bar: &Bar0,
+        spec: &Spec,
+    ) -> Result<SysmemFlush> {
+        SysmemFlush::register(pdev.as_ref(), bar, spec.chipset)
+    }
+
+    /// Returns the framebuffer layout and WPR metadata allocation.
+    fn setup_wpr_metadata(
+        pdev: &pci::Device<device::Bound>,
+        bar: &Bar0,
+        fw: &Firmware,
+        spec: &Spec,
+    ) -> Result<(FbLayout, CoherentAllocation<fw::GspFwWprMeta>)> {
+        let fb_layout = FbLayout::new(spec.chipset, bar, &fw)?;
+        let wpr_meta = gsp::build_wpr_meta(pdev.as_ref(), &fw, &fb_layout)?;
+        Ok((fb_layout, wpr_meta))
+    }
+
+    /// Create GSP falcon with architecture-specific validation logic.
+    ///
+    /// For Hopper/Blackwell, RISC-V validation is skipped until after FSP Chain of Trust.
+    fn create_gsp_falcon(
+        pdev: &pci::Device<device::Bound>,
+        bar: &Bar0,
+        spec: &Spec,
+    ) -> Result<Falcon<Gsp>> {
+        let gsp_falcon = Falcon::<Gsp>::new(pdev.as_ref(), spec.chipset)?;
+        gsp_falcon.clear_swgen0_intr(bar);
+        Ok(gsp_falcon)
     }
 
     pub(crate) fn new(
@@ -531,13 +789,12 @@ impl Gpu {
         pdev.as_ref().dma_set_coherent_mask((1 << 48) - 1)?;
 
         let fw_arch_group = Self::get_firmware_arch_group(spec.chipset.arch());
-        let (fw, sysmem_flush, wpr_meta, libos, gsp_info) = match fw_arch_group {
+        let (fw, sysmem_flush, wpr_meta) = match fw_arch_group {
             FirmwareArchGroup::TuringAmpereAda => {
                 Self::turing_ampere_ada_init_and_boot(pdev, &devres_bar, &spec)?
             }
             FirmwareArchGroup::HopperBlackwellPlus => {
-                // TODO: Implement in Step 4
-                return Err(ENOTSUPP);
+                Self::hopper_blackwell_plus_init_and_boot(pdev, &devres_bar, &spec)?
             }
         };
 
@@ -547,8 +804,6 @@ impl Gpu {
             fw,
             sysmem_flush,
             wpr_meta,
-            libos,
-            gsp_info,
         }))
     }
 }

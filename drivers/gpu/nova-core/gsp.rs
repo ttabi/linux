@@ -10,6 +10,7 @@ use kernel::alloc::Allocator;
 use kernel::asm;
 use kernel::bindings;
 use kernel::device;
+use kernel::devres::Devres;
 use kernel::dma::CoherentAllocation;
 use kernel::pci;
 use kernel::pr_info;
@@ -20,6 +21,7 @@ use kernel::{dma_read, dma_write};
 
 use crate::dma::DmaObject;
 use crate::driver::Bar0;
+use crate::falcon::{gsp::Gsp, sec2::Sec2, Falcon};
 use crate::fb::FbLayout;
 use crate::firmware::Firmware;
 use crate::nvfw::r570_144 as fw;
@@ -275,18 +277,31 @@ unsafe impl FromBytesSized for GspMem {}
 unsafe impl AsBytes for GspMem {}
 
 // SAFETY: this hack isn't :-) Only required until Nova core can boot GSP.
-unsafe impl Send for GspCmdq {}
+unsafe impl Send for GspCmdq<'_> {}
 
-pub(crate) struct GspCmdq {
+pub(crate) struct GspCmdq<'a> {
     msg_count: u32,
     seq: u32,
     gsp_mem: CoherentAllocation<GspMem>,
     nr_ptes: u32,
+    bar: &'a Devres<Bar0>,
+    gsp_falcon: &'a Falcon<Gsp>,
+    sec2_falcon: Option<&'a Falcon<Sec2>>,
+    libos_dma_handle: u64,
+    fw: &'a Firmware,
+    dev: &'a device::Device<device::Bound>,
 }
 
-impl GspCmdq {
+impl<'a> GspCmdq<'a> {
     // This is equivalent to gsp_shared_init()
-    fn new(dev: &device::Device<device::Bound>, _libos_dma_handle: u64) -> Result<GspCmdq> {
+    fn new(
+        dev: &'a device::Device<device::Bound>,
+        bar: &'a Devres<Bar0>,
+        gsp_falcon: &'a Falcon<Gsp>,
+        sec2_falcon: Option<&'a Falcon<Sec2>>,
+        libos_dma_handle: u64,
+        fw: &'a Firmware,
+    ) -> Result<GspCmdq<'a>> {
         let mut gsp_mem =
             CoherentAllocation::<GspMem>::alloc_coherent(dev, 1, GFP_KERNEL | __GFP_ZERO)?;
 
@@ -316,6 +331,12 @@ impl GspCmdq {
             seq: 0,
             gsp_mem,
             nr_ptes: nr_ptes as u32,
+            bar,
+            gsp_falcon,
+            sec2_falcon,
+            libos_dma_handle,
+            fw,
+            dev,
         })
     }
 
@@ -650,6 +671,38 @@ impl GspCmdq {
             fw::NV_VGPU_MSG_FUNCTION_GET_GSP_STATIC_INFO,
         )
     }
+
+    pub(crate) fn run_sequencer(self: &mut Self, timeout: Delta) -> Result {
+        // Always consume the sequencer message first to unblock the message queue
+        let seq_info = self.receive_wait::<sequencer::GspSequencerInfo>(
+            self.dev,
+            timeout,
+            fw::NV_VGPU_MSG_EVENT_GSP_RUN_CPU_SEQUENCER,
+        )?;
+
+        // Skip sequencer processing for architectures without SEC2 (like Blackwell)
+        if self.sec2_falcon.is_none() {
+            pr_info!("Skipping CPU sequencer processing - not needed for this architecture\n");
+            return Ok(());
+        }
+        self.bar
+            .try_access_with(|bar| {
+                match sequencer::GspSequencer::new(
+                    self,
+                    self.fw,
+                    self.libos_dma_handle,
+                    self.gsp_falcon,
+                    self.sec2_falcon.unwrap(),
+                    self.dev,
+                    bar,
+                    timeout,
+                ) {
+                    Ok(sequencer) => sequencer.run(),
+                    Err(e) => Err(e),
+                }
+            })
+            .ok_or(ENODEV)?
+    }
 }
 
 struct EmptyCmd {
@@ -746,14 +799,14 @@ pub(crate) fn build_wpr_meta(
     Ok(wpr_meta)
 }
 
-#[allow(unused)]
-pub(crate) struct GspMemObjects {
-    libos: DmaObject,
+pub(crate) struct GspMemObjects<'a> {
+    pub libos: DmaObject,
     pub loginit: DmaObject,
     pub logintr: DmaObject,
     pub logrm: DmaObject,
+    #[allow(dead_code)] // Will be used for advanced GSP functionality
     rmargs: CoherentAllocation<fw::GSP_ARGUMENTS_CACHED>,
-    pub cmdq: GspCmdq,
+    pub cmdq: GspCmdq<'a>,
 }
 
 /// Generates the `ID8` identifier required for some GSP objects.
@@ -900,7 +953,7 @@ impl GspCommand for RegistryTable {
     const FUNCTION: u32 = fw::NV_VGPU_MSG_FUNCTION_SET_REGISTRY;
 }
 
-fn build_registry(dev: &device::Device<device::Bound>, bar: &Bar0, cmdq: &mut GspCmdq) {
+fn build_registry(dev: &device::Device<device::Bound>, bar: &Bar0, cmdq: &mut GspCmdq<'_>) {
     let registry = RegistryTable {
         entries: [
             RegistryEntry {
@@ -921,7 +974,7 @@ impl GspCommand for fw::GspSystemInfo {
     const FUNCTION: u32 = fw::NV_VGPU_MSG_FUNCTION_GSP_SET_SYSTEM_INFO;
 }
 
-fn set_system_info(dev: &pci::Device<device::Bound>, bar: &Bar0, cmdq: &mut GspCmdq) -> Result {
+fn set_system_info(dev: &pci::Device<device::Bound>, bar: &Bar0, cmdq: &mut GspCmdq<'_>) -> Result {
     let mut info = unsafe { MaybeUninit::<fw::GspSystemInfo>::zeroed().assume_init() };
 
     info.gpuPhysAddr = dev.resource_start(0)?;
@@ -975,8 +1028,14 @@ fn create_coherent_dma_object<A: AsBytes + FromBytes>(
     Ok(obj)
 }
 
-impl GspMemObjects {
-    pub(crate) fn new(pdev: &pci::Device<device::Bound>, bar: &Bar0) -> Result<Self> {
+impl<'a> GspMemObjects<'a> {
+    pub(crate) fn new(
+        pdev: &'a pci::Device<device::Bound>,
+        bar: &'a Devres<Bar0>,
+        gsp_falcon: &'a Falcon<Gsp>,
+        sec2_falcon: Option<&'a Falcon<Sec2>>,
+        fw: &'a Firmware,
+    ) -> Result<Self> {
         let dev = pdev.as_ref();
         let mut libos = DmaObject::new(dev, GSP_PAGE_SIZE)?;
         let loginit = create_dma_object(dev, "LOGINIT", 0x10000, &mut libos, 0)?;
@@ -984,7 +1043,7 @@ impl GspMemObjects {
         let logrm = create_dma_object(dev, "LOGRM", 0x10000, &mut libos, 2)?;
 
         // Creates its own PTE array
-        let mut cmdq = GspCmdq::new(dev, libos.dma_handle())?;
+        let mut cmdq = GspCmdq::new(dev, bar, gsp_falcon, sec2_falcon, libos.dma_handle(), fw)?;
         let rmargs =
             create_coherent_dma_object::<fw::GSP_ARGUMENTS_CACHED>(dev, "RMARGS", &mut libos, 3)?;
         dma_write!(
@@ -1006,8 +1065,9 @@ impl GspMemObjects {
         )?;
         dma_write!(rmargs[0].bDmemStack = 1)?;
 
-        set_system_info(pdev, bar, &mut cmdq)?;
-        build_registry(dev, bar, &mut cmdq);
+        let bar_access = bar.access(dev)?;
+        set_system_info(pdev, bar_access, &mut cmdq)?;
+        build_registry(dev, bar_access, &mut cmdq);
 
         Ok(GspMemObjects {
             libos,

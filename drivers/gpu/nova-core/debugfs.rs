@@ -74,7 +74,7 @@ impl NovaDebugfs {
         })
     }
 
-    pub(crate) fn create_log_files(&mut self, gsp_mem: &GspMemObjects) -> Result {
+    pub(crate) fn create_log_files(&mut self, gsp_mem: &GspMemObjects<'_>) -> Result {
         self.loginit_info.data = gsp_mem.loginit.start_ptr() as *mut c_void;
         self.loginit_info.size = gsp_mem.loginit.size();
 

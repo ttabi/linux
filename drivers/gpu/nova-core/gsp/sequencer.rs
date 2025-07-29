@@ -384,7 +384,7 @@ impl<'a, 'b> IntoIterator for &'b GspSequencer<'a> {
 
 impl<'a> GspSequencer<'a> {
     pub(crate) fn new(
-        cmdq: &mut crate::gsp::GspCmdq,
+        cmdq: &mut crate::gsp::GspCmdq<'_>,
         fw: &'a Firmware,
         libos_dma_handle: u64,
         gsp_falcon: &'a Falcon<Gsp>,
