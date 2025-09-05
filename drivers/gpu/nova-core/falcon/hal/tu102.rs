@@ -10,7 +10,7 @@ use kernel::{
 };
 
 use crate::driver::Bar0;
-use crate::falcon::{Falcon, FalconBromParams, FalconEngine};
+use crate::falcon::{hal::LoadMethod, Falcon, FalconBromParams, FalconEngine};
 use crate::regs;
 
 use super::FalconHal;
@@ -71,7 +71,7 @@ impl<E: FalconEngine> FalconHal<E> for Tu102<E> {
         Ok(())
     }
 
-    fn supports_dma(&self) -> bool {
-        false
+    fn load_method(&self) -> LoadMethod {
+        LoadMethod::Pio
     }
 }
