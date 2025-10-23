@@ -18,10 +18,21 @@ mod regs;
 mod sbuffer;
 mod vbios;
 
+use kernel::debugfs::Dir;
+
 pub(crate) const MODULE_NAME: &kernel::str::CStr = <LocalModule as kernel::ModuleMetadata>::NAME;
+
+static mut DEBUGFS_ROOT: Option<Dir> = None;
 
 kernel::module_pci_driver! {
     type: driver::NovaCore,
+    init: || {
+        kernel::pr_info!("Nova Core GPU driver initializing...\n");
+        let dir = Dir::new(kernel::c_str!("nova_core"));
+        // SAFETY: we are the only driver code running, so there cannot be any concurrent access to
+        // `DEBUGFS_ROOT`.
+        unsafe { DEBUGFS_ROOT = Some(dir) };
+    },
     name: "NovaCore",
     authors: ["Danilo Krummrich"],
     description: "Nova Core GPU driver",
