@@ -889,17 +889,27 @@ unsafe impl AsBytes for GspMsgElement {}
 unsafe impl FromBytes for GspMsgElement {}
 
 /// Arguments for GSP startup.
-#[repr(transparent)]
-pub(crate) struct GspArgumentsCached(bindings::GSP_ARGUMENTS_CACHED);
+///
+/// On Turing and GA100, the entries in the `LibosMemoryRegionInitArgument`
+/// must all be a multiple of GSP_PAGE_SIZE in size, so add padding to force it
+/// to that size.
+#[repr(C)]
+pub(crate) struct GspArgumentsCached(
+    bindings::GSP_ARGUMENTS_CACHED,
+    [u8; GSP_PAGE_SIZE - core::mem::size_of::<bindings::GSP_ARGUMENTS_CACHED>()],
+);
 
 impl GspArgumentsCached {
     /// Creates the arguments for starting the GSP up using `cmdq` as its command queue.
     pub(crate) fn new(cmdq: &Cmdq) -> Self {
-        Self(bindings::GSP_ARGUMENTS_CACHED {
-            messageQueueInitArguments: MessageQueueInitArguments::new(cmdq).0,
-            bDmemStack: 1,
-            ..Default::default()
-        })
+        Self(
+            bindings::GSP_ARGUMENTS_CACHED {
+                messageQueueInitArguments: MessageQueueInitArguments::new(cmdq).0,
+                bDmemStack: 1,
+                ..Default::default()
+            },
+            Zeroable::zeroed(),
+        )
     }
 }
 
