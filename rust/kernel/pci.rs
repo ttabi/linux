@@ -114,6 +114,24 @@ impl<T: Driver + 'static> Adapter<T> {
 ///     license: "GPL v2",
 /// }
 ///```
+///
+/// With optional initialization closure, that is executed when the driver loads,
+/// before PCI registration.
+///
+///```ignore
+/// kernel::module_pci_driver! {
+///     type: MyDriver,
+///     init: || {
+///         pr_info!("Custom module initialization\n");
+///         // Perform one-time module setup here
+///     },
+///     name: "Module name",
+///     authors: ["Author name"],
+///     description: "Description",
+///     license: "GPL v2",
+/// }
+///```
+///
 #[macro_export]
 macro_rules! module_pci_driver {
 ($($f:tt)*) => {
