@@ -125,13 +125,55 @@ pub(crate) enum FalconUCodeDesc {
     V3(FalconUCodeDescV3),
 }
 
+// First define trait
+pub(crate) trait FalconUCodeDescriptor {
+    fn hdr(&self) -> u32;
+    fn imem_load_size(&self) -> u32;
+    fn interface_offset(&self) -> u32;
+    fn dmem_load_size(&self) -> u32;
+    fn pkc_data_offset(&self) -> u32;
+    fn engine_id_mask(&self) -> u16;
+    fn ucode_id(&self) -> u8;
+    fn signature_count(&self) -> u8;
+    fn signature_versions(&self) -> u16;
+}
+
+impl FalconUCodeDescriptor for FalconUCodeDescV2 {
+    fn hdr(&self) -> u32  { self.hdr }
+    fn imem_load_size(&self) -> u32  { self.imem_load_size }
+    fn interface_offset(&self) -> u32  { self.interface_offset }
+    fn dmem_load_size(&self) -> u32 { self.dmem_load_size }
+    fn pkc_data_offset(&self) -> u32 { 0 }
+    fn engine_id_mask(&self) -> u16 { 0 }
+    fn ucode_id(&self) -> u8 { 0 }
+    fn signature_count(&self) -> u8 { 0 }
+    fn signature_versions(&self) -> u16 { 0 }
+}
+
+impl FalconUCodeDescriptor for FalconUCodeDescV3 {
+    fn hdr(&self) -> u32  { self.hdr }
+    fn imem_load_size(&self) -> u32  { self.imem_load_size }
+    fn interface_offset(&self) -> u32  { self.interface_offset }
+    fn dmem_load_size(&self) -> u32 { self.dmem_load_size }
+    fn pkc_data_offset(&self) -> u32 { self.pkc_data_offset }
+    fn engine_id_mask(&self) -> u16 { self.engine_id_mask }
+    fn ucode_id(&self) -> u8 { self.ucode_id }
+    fn signature_count(&self) -> u8 { self.signature_count }
+    fn signature_versions(&self) -> u16 { self.signature_versions }
+}
+
 impl FalconUCodeDesc {
+    // Return trait object, the only match needed.
+    pub(crate) fn as_descriptor(&self) -> &dyn FalconUCodeDescriptor {
+        match self {
+            FalconUCodeDesc::V2(v2) => v2,
+            FalconUCodeDesc::V3(v3) => v3,
+        }
+    }
+
     /// Returns the size in bytes of the header.
     pub(crate) fn size(&self) -> usize {
-        let hdr = match self {
-            FalconUCodeDesc::V2(v2) => v2.hdr,
-            FalconUCodeDesc::V3(v3) => v3.hdr,
-        };
+        let hdr = self.as_descriptor().hdr();
 
         const HDR_SIZE_SHIFT: u32 = 16;
         const HDR_SIZE_MASK: u32 = 0xffff0000;
@@ -139,60 +181,35 @@ impl FalconUCodeDesc {
     }
 
     pub(crate) fn imem_load_size(&self) -> u32 {
-        match self {
-            FalconUCodeDesc::V2(v2) => v2.imem_load_size,
-            FalconUCodeDesc::V3(v3) => v3.imem_load_size,
-        }
+        self.as_descriptor().imem_load_size()
     }
 
     pub(crate) fn interface_offset(&self) -> u32 {
-        match self {
-            FalconUCodeDesc::V2(v2) => v2.interface_offset,
-            FalconUCodeDesc::V3(v3) => v3.interface_offset,
-        }
+        self.as_descriptor().interface_offset()
     }
 
-
     pub(crate) fn dmem_load_size(&self) -> u32 {
-        match self {
-            FalconUCodeDesc::V2(v2) => v2.dmem_load_size,
-            FalconUCodeDesc::V3(v3) => v3.dmem_load_size,
-        }
+        self.as_descriptor().dmem_load_size()
     }
 
     pub(crate) fn pkc_data_offset(&self) -> u32 {
-        match self {
-            FalconUCodeDesc::V2(_v2) => 0,
-            FalconUCodeDesc::V3(v3) => v3.pkc_data_offset,
-        }
+        self.as_descriptor().pkc_data_offset()
     }
 
     pub(crate) fn engine_id_mask(&self) -> u16 {
-        match self {
-            FalconUCodeDesc::V2(_v2) => 0,
-            FalconUCodeDesc::V3(v3) => v3.engine_id_mask,
-        }
+        self.as_descriptor().engine_id_mask()
     }
 
     pub(crate) fn ucode_id(&self) -> u8 {
-        match self {
-            FalconUCodeDesc::V2(_v2) => 0,
-            FalconUCodeDesc::V3(v3) => v3.ucode_id,
-        }
+        self.as_descriptor().ucode_id()
     }
 
     pub(crate) fn signature_count(&self) -> u8 {
-        match self {
-            FalconUCodeDesc::V2(_v2) => 0,
-            FalconUCodeDesc::V3(v3) => v3.signature_count,
-        }
+        self.as_descriptor().signature_count()
     }
 
     pub(crate) fn signature_versions(&self) -> u16 {
-        match self {
-            FalconUCodeDesc::V2(_v2) => 0,
-            FalconUCodeDesc::V3(v3) => v3.signature_versions,
-        }
+        self.as_descriptor().signature_versions()
     }
 }
 
