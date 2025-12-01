@@ -120,7 +120,7 @@ macro_rules! define_read {
         /// Bound checks are performed on compile time, hence if the offset is not known at compile
         /// time, the build will fail.
         $(#[$attr])*
-        #[inline]
+        #[inline(always)]
         pub fn $name(&self, offset: usize) -> $type_name {
             let addr = self.io_addr_assert::<$type_name>(offset);
 
@@ -149,7 +149,7 @@ macro_rules! define_write {
         /// Bound checks are performed on compile time, hence if the offset is not known at compile
         /// time, the build will fail.
         $(#[$attr])*
-        #[inline]
+        #[inline(always)]
         pub fn $name(&self, value: $type_name, offset: usize) {
             let addr = self.io_addr_assert::<$type_name>(offset);
 
@@ -196,7 +196,7 @@ impl<const SIZE: usize> Io<SIZE> {
         self.0.maxsize()
     }
 
-    #[inline]
+    #[inline(always)]
     const fn offset_valid<U>(offset: usize, size: usize) -> bool {
         let type_size = core::mem::size_of::<U>();
         if let Some(end) = offset.checked_add(type_size) {
@@ -217,7 +217,7 @@ impl<const SIZE: usize> Io<SIZE> {
         self.addr().checked_add(offset).ok_or(EINVAL)
     }
 
-    #[inline]
+    #[inline(always)]
     fn io_addr_assert<U>(&self, offset: usize) -> usize {
         build_assert!(Self::offset_valid::<U>(offset, SIZE));
 
