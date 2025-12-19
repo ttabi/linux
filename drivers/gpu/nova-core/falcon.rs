@@ -490,7 +490,7 @@ impl<E: FalconEngine + 'static> Falcon<E> {
         let len = usize::from_safe_cast(load_offsets.len);
         let mem_base = u16::try_from(load_offsets.dst_start)?;
 
-        // SAFETY: as_slice() ensures that start+len is within range
+        // SAFETY: we are the only user of the firmware image at this stage
         let data = unsafe { fw.as_slice(start, len).map_err(|_| EINVAL)? };
 
         self.pio_wr_bytes(bar, data, mem_base, target_mem, port, tag)
