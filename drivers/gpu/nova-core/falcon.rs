@@ -493,7 +493,11 @@ impl<E: FalconEngine + 'static> Falcon<E> {
             Some(_) => (),
         };
 
-        // Set up the base source DMA address.
+        // Set up the base source DMA address.  DMATRFBASE only supports a 49-bit address.
+        if dma_start > kernel::dma::DmaMask::new::<49>().value() {
+            dev_err!(self.dev, "DMA address {:#x} exceeds 49 bits\n", dma_start);
+            return Err(ERANGE);
+        }
 
         regs::NV_PFALCON_FALCON_DMATRFBASE::default()
             // CAST: `as u32` is used on purpose since we do want to strip the upper bits, which
