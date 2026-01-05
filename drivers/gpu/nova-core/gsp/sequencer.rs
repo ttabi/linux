@@ -121,7 +121,7 @@ impl GspSeqCmd {
         };
 
         if data.len() < size {
-            dev_err!(dev, "Data is not enough for command");
+            dev_err!(dev, "Data is not enough for command\n");
             return Err(EINVAL);
         }
 
@@ -320,7 +320,7 @@ impl<'a> Iterator for GspSeqIter<'a> {
 
         cmd_result.map_or_else(
             |_err| {
-                dev_err!(self.dev, "Error parsing command at offset {}", offset);
+                dev_err!(self.dev, "Error parsing command at offset {}\n", offset);
                 None
             },
             |(cmd, size)| {
@@ -382,7 +382,7 @@ impl<'a> GspSequencer<'a> {
             dev: params.dev,
         };
 
-        dev_dbg!(sequencer.dev, "Running CPU Sequencer commands");
+        dev_dbg!(sequencer.dev, "Running CPU Sequencer commands\n");
 
         for cmd_result in sequencer.iter() {
             match cmd_result {
