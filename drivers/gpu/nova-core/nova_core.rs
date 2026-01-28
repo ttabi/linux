@@ -4,7 +4,7 @@
 
 use kernel::{
     debugfs::Dir,
-    error::Error,
+    driver::Registration,
     pci,
     prelude::*,
     InPlaceModule, //
@@ -33,7 +33,7 @@ static mut DEBUGFS_ROOT: Option<Dir> = None;
 #[pin_data(PinnedDrop)]
 struct NovaCoreModule {
     #[pin]
-    _driver: kernel::driver::Registration<pci::Adapter<driver::NovaCore>>,
+    _driver: Registration<pci::Adapter<driver::NovaCore>>,
 }
 
 impl InPlaceModule for NovaCoreModule {
@@ -45,7 +45,7 @@ impl InPlaceModule for NovaCoreModule {
         unsafe { DEBUGFS_ROOT = Some(dir) };
 
         try_pin_init!(Self {
-            _driver <- kernel::driver::Registration::new(MODULE_NAME, module),
+            _driver <- Registration::new(MODULE_NAME, module),
         })
     }
 }
