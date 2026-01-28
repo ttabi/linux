@@ -3,7 +3,7 @@
 //! Nova Core GPU Driver
 
 use kernel::{
-    debugfs::Dir,
+    debugfs,
     driver::Registration,
     pci,
     prelude::*,
@@ -28,34 +28,41 @@ mod vbios;
 
 pub(crate) const MODULE_NAME: &kernel::str::CStr = <LocalModule as kernel::ModuleMetadata>::NAME;
 
-static mut DEBUGFS_ROOT: Option<Dir> = None;
+// FIXME: Move this into per-module data once that exists
+static mut DEBUGFS_ROOT: Option<debugfs::Dir> = None;
 
-#[pin_data(PinnedDrop)]
+/// Guard that clears DEBUGFS_ROOT when dropped.
+struct DebugfsRootGuard;
+
+impl Drop for DebugfsRootGuard {
+    fn drop(&mut self) {
+        // SAFETY: This guard is dropped after _driver (due to field order),
+        // so the driver is unregistered and no probe() can be running.
+        unsafe { DEBUGFS_ROOT = None };
+    }
+}
+
+#[pin_data]
 struct NovaCoreModule {
+    // Fields are dropped in declaration order, so _driver is dropped first,
+    // then _debugfs_guard clears DEBUGFS_ROOT.
     #[pin]
     _driver: Registration<pci::Adapter<driver::NovaCore>>,
+    _debugfs_guard: DebugfsRootGuard,
 }
 
 impl InPlaceModule for NovaCoreModule {
     fn init(module: &'static kernel::ThisModule) -> impl PinInit<Self, Error> {
-        let dir = Dir::new(kernel::c_str!("nova_core"));
+        let dir = debugfs::Dir::new(kernel::c_str!("nova_core"));
 
-        // SAFETY: we are the only driver code running, so there cannot be any concurrent access to
-        // `DEBUGFS_ROOT`.
+        // SAFETY: We are the only driver code running during init, so there
+        // cannot be any concurrent access to `DEBUGFS_ROOT`.
         unsafe { DEBUGFS_ROOT = Some(dir) };
 
         try_pin_init!(Self {
             _driver <- Registration::new(MODULE_NAME, module),
+            _debugfs_guard: DebugfsRootGuard,
         })
-    }
-}
-
-#[pinned_drop]
-impl PinnedDrop for NovaCoreModule {
-    fn drop(self: Pin<&mut Self>) {
-        // SAFETY: we are the only driver code running, so there cannot be any concurrent access to
-        // `DEBUGFS_ROOT`.
-        unsafe { DEBUGFS_ROOT = None };
     }
 }
 
