@@ -126,13 +126,6 @@ pub(crate) struct Gsp {
     rmargs: CoherentAllocation<GspArgumentsPadded>,
 }
 
-// SAFETY: `LogBuffer` only provides shared access to the underlying `CoherentAllocation`.
-// GSP may write to the buffer concurrently regardless of CPU access, so concurrent reads
-// from multiple CPU threads do not introduce any additional races beyond what already
-// exists with the device. Reads may observe partially-written log entries, which is
-// acceptable for debug logging purposes.
-unsafe impl Sync for LogBuffer {}
-
 impl Gsp {
     // Creates an in-place initializer for a `Gsp` manager for `pdev`.
     pub(crate) fn new(pdev: &pci::Device<device::Bound>) -> impl PinInit<Self, Error> + '_ {
