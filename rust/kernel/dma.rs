@@ -649,12 +649,14 @@ impl<T: AsBytes + FromBytes> Drop for CoherentAllocation<T> {
     }
 }
 
-// SAFETY: All methods that access the underlying DMA buffer (`field_read`, `field_write`,
-// `as_slice`, `as_slice_mut`) are `unsafe`, and callers are responsible for ensuring no data
-// races occur between kernel threads. The safe methods only return metadata (e.g. `count()`,
-// `dma_handle()`) or raw pointers whose use requires `unsafe`. It is safe to send or share
-// a `CoherentAllocation` across threads if `T` can be sent or shared.
+// SAFETY: It is safe to send a `CoherentAllocation` to another thread if `T`
+// can be sent to another thread.
 unsafe impl<T: AsBytes + FromBytes + Send> Send for CoherentAllocation<T> {}
+
+// SAFETY: Sharing `&CoherentAllocation` across threads is safe if `T` is `Sync`, because all
+// methods that access the buffer contents (`field_read`, `field_write`, `as_slice`,
+// `as_slice_mut`) are `unsafe`, and callers are responsible for ensuring no data races occur.
+// The safe methods only return metadata or raw pointers whose use requires `unsafe`.
 unsafe impl<T: AsBytes + FromBytes + Sync> Sync for CoherentAllocation<T> {}
 
 impl debugfs::BinaryWriter for CoherentAllocation<u8> {
