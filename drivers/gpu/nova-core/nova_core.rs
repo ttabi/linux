@@ -53,11 +53,14 @@ struct NovaCoreModule {
 
 impl InPlaceModule for NovaCoreModule {
     fn init(module: &'static kernel::ThisModule) -> impl PinInit<Self, Error> {
-        let dir = debugfs::Dir::new(kernel::c_str!("nova_core"));
+        #[cfg(CONFIG_NOVA_CORE_DEBUGFS)]
+        {
+            let dir = debugfs::Dir::new(kernel::c_str!("nova_core"));
 
-        // SAFETY: We are the only driver code running during init, so there
-        // cannot be any concurrent access to `DEBUGFS_ROOT`.
-        unsafe { DEBUGFS_ROOT = Some(dir) };
+            // SAFETY: We are the only driver code running during init, so there
+            // cannot be any concurrent access to `DEBUGFS_ROOT`.
+            unsafe { DEBUGFS_ROOT = Some(dir) };
+        }
 
         try_pin_init!(Self {
             _driver <- Registration::new(MODULE_NAME, module),
