@@ -171,8 +171,8 @@ impl Gsp {
                     };
 
                     #[allow(static_mut_refs)]
-                    // SAFETY: `DEBUGFS_ROOT` is never modified after initialization, so it is
-                    // safe to create a shared reference to it.
+                    // SAFETY: `DEBUGFS_ROOT` is created before driver registration and cleared
+                    // after driver unregistration, so no probe() can race with its modification.
                     let debugfs_root = unsafe { crate::DEBUGFS_ROOT.as_ref() }
                         .unwrap_or_else(|| debugfs::Dir::empty());
 
