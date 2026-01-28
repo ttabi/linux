@@ -126,38 +126,6 @@ pub(crate) struct Gsp {
     rmargs: CoherentAllocation<GspArgumentsPadded>,
 }
 
-impl debugfs::BinaryWriter for LogBuffer {
-    fn write_to_slice(
-        &self,
-        writer: &mut kernel::uaccess::UserSliceWriter,
-        offset: &mut kernel::fs::file::Offset,
-    ) -> Result<usize> {
-        if offset.is_negative() {
-            return Err(EINVAL);
-        }
-
-        let offset_val: usize = (*offset).try_into().map_err(|_| EINVAL)?;
-        let len = self.0.count();
-
-        if offset_val >= len {
-            return Ok(0);
-        }
-
-        let count = (len - offset_val).min(writer.len());
-
-        // SAFETY:
-        // - `start_ptr()` returns a valid pointer to a memory region of `count()` bytes,
-        //   as guaranteed by the `CoherentAllocation` invariants.
-        // - `len` equals `self.0.count()`, so the pointer is valid for `len` bytes.
-        // - `offset_val < len` is guaranteed by the check above.
-        // - `count = (len - offset_val).min(writer.len())`, so `offset_val + count <= len`.
-        unsafe { writer.write_buffer(self.0.start_ptr(), len, offset_val, count)? };
-
-        *offset += count as i64;
-        Ok(count)
-    }
-}
-
 // SAFETY: `LogBuffer` only provides shared access to the underlying `CoherentAllocation`.
 // GSP may write to the buffer concurrently regardless of CPU access, so concurrent reads
 // from multiple CPU threads do not introduce any additional races beyond what already
