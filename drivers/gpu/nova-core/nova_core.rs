@@ -65,6 +65,7 @@ module! {
     authors: ["Danilo Krummrich"],
     description: "Nova Core GPU driver",
     license: "GPL v2",
+    firmware: [],
 }
 
 kernel::module_firmware!(firmware::ModInfoBuilder);
