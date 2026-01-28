@@ -184,9 +184,9 @@ impl Gsp {
                         .unwrap_or_else(|| debugfs::Dir::empty());
 
                     debugfs_root.scope(log_buffers, dev.name(), |logs, dir| {
-                        dir.read_binary_file(c_str!("loginit"), &logs.loginit);
-                        dir.read_binary_file(c_str!("logintr"), &logs.logintr);
-                        dir.read_binary_file(c_str!("logrm"), &logs.logrm);
+                        dir.read_binary_file(c_str!("loginit"), &logs.loginit.0);
+                        dir.read_binary_file(c_str!("logintr"), &logs.logintr.0);
+                        dir.read_binary_file(c_str!("logrm"), &logs.logrm.0);
                     })
                 },
             }))
