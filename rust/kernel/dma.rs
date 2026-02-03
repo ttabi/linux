@@ -673,7 +673,7 @@ impl debugfs::BinaryWriter for CoherentAllocation<u8> {
         // to read past end of file.
         let Ok(offset_val) = usize::try_from(*offset) else { return Ok(0) };
 
-        let len = self.count();
+        let len = self.size();
 
         if offset_val >= len {
             return Ok(0);

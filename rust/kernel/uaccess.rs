@@ -519,7 +519,7 @@ impl UserSliceWriter {
             return Err(ERANGE);
         }
 
-        // SAFETY: `start_ptr()` returns a valid pointer to a memory region of `count()` bytes,
+        // SAFETY: `start_ptr()` returns a valid pointer to a memory region of `size()` bytes,
         // as guaranteed by the `CoherentAllocation` invariants. The check above ensures
         // `offset + count <= len`.
         let src_ptr = unsafe { data.start_ptr().add(offset) };

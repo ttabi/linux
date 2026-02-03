@@ -173,8 +173,7 @@ impl Gsp {
                     #[allow(static_mut_refs)]
                     // SAFETY: `DEBUGFS_ROOT` is created before driver registration and cleared
                     // after driver unregistration, so no probe() can race with its modification.
-                    let log_parent = unsafe { crate::DEBUGFS_ROOT.as_ref() }
-                        .expect("DEBUGFS_ROOT not initialized");
+                    let log_parent = unsafe { crate::DEBUGFS_ROOT.as_ref() }.expect("");
 
                     log_parent.scope(log_buffers, dev.name(), |logs, dir| {
                         dir.read_binary_file(c_str!("loginit"), &logs.loginit.0);
