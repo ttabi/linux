@@ -15,6 +15,7 @@ mod bitfield;
 
 mod driver;
 mod falcon;
+mod iface;
 mod fb;
 mod firmware;
 mod gfw;
