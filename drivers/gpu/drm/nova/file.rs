@@ -3,9 +3,8 @@
 use crate::driver::{NovaDevice, NovaDriver};
 use crate::gem::NovaObject;
 use kernel::{
-    alloc::flags::*,
+    bindings,
     drm::{self, gem::BaseObject},
-    pci,
     prelude::*,
     uapi,
 };
@@ -27,16 +26,20 @@ impl File {
         getparam: &mut uapi::drm_nova_getparam,
         _file: &drm::File<File>,
     ) -> Result<u32> {
-        let adev = &dev.adev;
-        let parent = adev.parent();
-        let pdev: &pci::Device = parent.try_into()?;
+        let parent = dev.adev.parent();
+        let parent_raw = parent.as_raw();
 
-        let value = match getparam.param as u32 {
-            uapi::NOVA_GETPARAM_VRAM_BAR_SIZE => pdev.resource_len(1)?,
+        // Rust won't let us match u64 against u32, so we have to create u64 versions
+        // of any parameters we support.
+        const VRAM_BAR_SIZE: u64 = uapi::NOVA_GETPARAM_VRAM_BAR_SIZE as u64;
+
+        getparam.value = match getparam.param {
+            VRAM_BAR_SIZE => {
+                // SAFETY: `parent_raw` is the parent device from our auxiliary device.
+                unsafe { bindings::nova_core_vram_bar_size(parent_raw) }
+            }
             _ => return Err(EINVAL),
         };
-
-        getparam.value = Into::<u64>::into(value);
 
         Ok(0)
     }
