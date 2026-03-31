@@ -226,6 +226,9 @@ impl fmt::Display for Spec {
 #[pin_data]
 pub(crate) struct Gpu {
     spec: Spec,
+    /// Size of PCI BAR 1 (VRAM) in bytes, captured at probe time.
+    /// TODO: When Nova adds support for BAR1, we won't need this variable.
+    vram_bar_size: u64,
     /// MMIO mapping of PCI BAR 0
     bar: Arc<Devres<Bar0>>,
     /// System memory page required for flushing all pending GPU-side memory writes done through
@@ -250,6 +253,7 @@ impl Gpu {
             spec: Spec::new(pdev.as_ref(), bar).inspect(|spec| {
                 dev_info!(pdev,"NVIDIA ({})\n", spec);
             })?,
+            vram_bar_size: pdev.resource_len(1)?,
 
             // We must wait for GFW_BOOT completion before doing any significant setup on the GPU.
             _: {
@@ -273,6 +277,10 @@ impl Gpu {
 
             bar: devres_bar,
         })
+    }
+
+    pub(crate) fn vram_bar_size(&self) -> u64 {
+        self.vram_bar_size
     }
 
     /// Called when the corresponding [`Device`](device::Device) is unbound.
