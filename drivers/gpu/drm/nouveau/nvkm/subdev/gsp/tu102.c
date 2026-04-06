@@ -319,12 +319,12 @@ tu102_gsp_oneinit(struct nvkm_gsp *gsp)
 		return ret;
 
 	/*
-	 * Calculate FB layout. FRTS is a memory region created by the FWSEC-FRTS firmware.
-	 * FWSEC comes from VBIOS.  So on systems with no VBIOS (e.g. GA100), the FRTS does
-	 * not exist.  Therefore, use the existence of VBIOS to determine whether to reserve
-	 * an FRTS region.
+	 * Calculate FB layout. FRTS is a memory region created by running the FWSEC-FRTS
+	 * command, which writes power management data into WPR2. On GA100, the booter
+	 * firmware handles WPR2 setup directly and FRTS data is not needed, so no FRTS
+	 * region is reserved.
 	 */
-	gsp->fb.wpr2.frts.size = device->bios ? 0x100000 : 0;
+	gsp->fb.wpr2.frts.size = device->chipset == 0x170 ? 0 : 0x100000;
 	gsp->fb.wpr2.frts.addr = ALIGN_DOWN(gsp->fb.bios.addr, 0x20000) - gsp->fb.wpr2.frts.size;
 
 	gsp->fb.wpr2.boot.size = gsp->boot.fw.size;
