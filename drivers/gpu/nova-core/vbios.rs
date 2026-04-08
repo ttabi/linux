@@ -89,13 +89,87 @@ struct VbiosIterator<'a> {
     last_found: bool,
 }
 
+/// IFR signature: ASCII "NVGI" as a little-endian u32.
+const IFR_SIGNATURE: u32 = 0x4947564E;
+/// ROM directory signature: ASCII "RFRD" as a little-endian u32.
+const ROM_DIRECTORY_SIGNATURE: u32 = 0x44524652;
+
+/// Init-from-ROM (IFR) fixed header.
+///
+/// On GA100, the ROM may begin with an IFR header rather than the standard
+/// PCI ROM signature (0xAA55). The driver must parse this header
+/// to find the offset where the PCI Expansion ROM images actually start.
+///
+/// See `Documentation/gpu/nova/core/vbios.rst` for the full format description.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+struct IfrHeader {
+    /// FIXED0: Signature, must be [`IFR_SIGNATURE`] (0x4947564E, ASCII "NVGI").
+    signature: u32,
+    /// FIXED1:
+    ///   - bits  7:0  — Reserved
+    ///   - bits 15:8  — Software version (`VERSIONSW`)
+    ///   - bits 30:16 — Fixed data size (offset to extended section)
+    ///   - bit  31    — Reserved
+    fixed1: u32,
+    /// FIXED2:
+    ///   - bits 19:0  — Total data size
+    ///   - bits 30:20 — Reserved (zero)
+    ///   - bit  31    — Reserved
+    fixed2: u32,
+}
+
+// SAFETY: all bit patterns are valid for `IfrHeader`.
+unsafe impl FromBytes for IfrHeader {}
+
+impl IfrHeader {
+    // Note: we only expect version 3 headers
+    fn version(&self) -> u8 {
+        ((self.fixed1 >> 8) & 0xff) as u8
+    }
+
+    fn total_data_size(&self) -> u32 {
+        self.fixed2 & 0x000f_ffff
+    }
+}
+
 impl<'a> VbiosIterator<'a> {
     fn new(dev: &'a device::Device, bar0: &'a Bar0) -> Result<Self> {
+        let mut current_offset = 0;
+        let sig = bar0.try_read32(ROM_OFFSET)?;
+
+        if sig == IFR_SIGNATURE {
+            let fixed1 = bar0.try_read32(ROM_OFFSET + 4)?;
+            let version = ((fixed1 >> 8) & 0xff) as u8;
+            
+            current_offset = match version {
+                1 | 2 => {
+                    let fixed_data_size = ((fixed1 >> 16) & 0x7fff) as usize;
+                    bar0.try_read32(ROM_OFFSET + fixed_data_size + 4)? as usize
+                }
+                3 => {
+                    let fixed2 = bar0.try_read32(ROM_OFFSET + 8)?;
+                    let total_data_size = (fixed2 & 0x000f_ffff) as usize;
+                    let dir_offset = bar0.try_read32(ROM_OFFSET + total_data_size)? as usize + 4096;
+                    let dir_sig = bar0.try_read32(ROM_OFFSET + dir_offset)?;
+                    if dir_sig != ROM_DIRECTORY_SIGNATURE {
+                        dev_err!(dev, "could not find IFR ROM directory\n");
+                        return Err(EINVAL);
+                    }
+                    bar0.try_read32(ROM_OFFSET + dir_offset + 8)? as usize
+                }
+                _ => {
+                    dev_err!(dev, "unsupported IFR header version {}\n", version);
+                    return Err(EINVAL);
+                }
+            };
+        }
+
         Ok(Self {
             dev,
             bar0,
             data: KVec::new(),
-            current_offset: 0,
+            current_offset,
             last_found: false,
         })
     }
@@ -487,11 +561,57 @@ impl PciRomHeader {
             return Err(EINVAL);
         }
 
+        pr_err!("len = {:x}", data.len());
+
         let signature = u16::from_le_bytes([data[0], data[1]]);
+        pr_err!("signature = {:x}", signature);
+
+        let signature32 = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        pr_err!("signature32 = {:x}", signature32);
+
+        // Check for an IFR header first.  If found, we need to parse it to
+        // find the actual PCI ROM header.
+        if signature32 == 0x4947564E {
+            let version = data[5];
+            pr_err!("version = {}", version);
+
+            let fixed_data_size = u16::from_le_bytes([data[6], data[7]]) & 0x7fff;
+            let total_data_size = (u32::from_le_bytes([data[8], data[9], data[10], 0]) & 0xfffff) as usize;
+
+            pr_err!("fixed_data_size = {}", fixed_data_size);
+            pr_err!("total_data_size = {}", total_data_size);
+
+            let flash_status_offset = u32::from_le_bytes([data[total_data_size],
+                    data[total_data_size + 1],
+                    data[total_data_size + 2],
+                    data[total_data_size + 3]]) as usize;
+
+            pr_err!("flash_status_offset = {}", flash_status_offset);
+
+            let rom_directory_offset = flash_status_offset + 4096;
+
+            let rom_directory_signature = u32::from_le_bytes([data[rom_directory_offset],
+                    data[rom_directory_offset + 1],
+                    data[rom_directory_offset + 2],
+                    data[rom_directory_offset + 3]]) as usize;
+
+            pr_err!("rom_directory_signature = {:x}", rom_directory_signature);
+
+            let pci_rom_image_offset = u32::from_le_bytes([data[rom_directory_offset + 8],
+                    data[rom_directory_offset + 9],
+                    data[rom_directory_offset + 10],
+                    data[rom_directory_offset + 11]]) as usize;
+
+            pr_err!("pci_rom_image_offset = {:x}", pci_rom_image_offset);
+
+            let signature = u16::from_le_bytes([data[pci_rom_image_offset],
+                data[pci_rom_image_offset + 1]]);
+            pr_err!("signature = {:x}", signature);
+        }
 
         // Check for valid ROM signatures.
         match signature {
-            0xAA55 | 0xBB77 | 0x4E56 => {}
+            0xAA55 | 0x4E56 => {}
             _ => {
                 dev_err!(dev, "ROM signature unknown {:#x}\n", signature);
                 return Err(EINVAL);
@@ -714,7 +834,7 @@ impl BiosImage {
         }
 
         // Parse the ROM header.
-        let rom_header = PciRomHeader::new(dev, &data[0..26])
+        let rom_header = PciRomHeader::new(dev, &data[0..])
             .inspect_err(|e| dev_err!(dev, "Failed to create PciRomHeader: {:?}\n", e))?;
 
         // Get the PCI Data Structure using the pointer from the ROM header.
