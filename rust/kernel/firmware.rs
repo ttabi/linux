@@ -94,6 +94,34 @@ impl Firmware {
         Self::request_internal(name, dev, FwFunc::request_nowarn())
     }
 
+    /// Send a firmware request with a pre-allocated buffer. The firmware image is loaded directly
+    /// into `buf`. See also `bindings::request_firmware_into_buf`.
+    pub fn request_into_buf(name: &CStr, dev: &Device, buf: &mut [u8]) -> Result<Self> {
+        let mut fw: *mut bindings::firmware = core::ptr::null_mut();
+        let pfw: *mut *mut bindings::firmware = &mut fw;
+        let pfw: *mut *const bindings::firmware = pfw.cast();
+
+        // SAFETY: `pfw` is a valid pointer to a NULL initialized `bindings::firmware` pointer.
+        // `name` and `dev` are valid as by their type invariants. `buf` is a valid writable
+        // buffer of `buf.len()` bytes.
+        let ret = unsafe {
+            bindings::request_firmware_into_buf(
+                pfw,
+                name.as_char_ptr(),
+                dev.as_raw(),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+            )
+        };
+        if ret != 0 {
+            return Err(Error::from_errno(ret));
+        }
+
+        // SAFETY: `request_firmware_into_buf` not bailing out with a non-zero error code
+        // guarantees that `fw` is a valid pointer to `bindings::firmware`.
+        Ok(Firmware(unsafe { NonNull::new_unchecked(fw) }))
+    }
+
     fn as_raw(&self) -> *mut bindings::firmware {
         self.0.as_ptr()
     }
