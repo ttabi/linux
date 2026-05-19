@@ -31,9 +31,11 @@ pub(crate) mod fwsec;
 pub(crate) mod gsp;
 pub(crate) mod riscv;
 
+#[allow(unused)]
 pub(crate) const FIRMWARE_VERSION: &str = "570.144";
 
 /// Requests the GPU firmware `name` suitable for `chipset`, with version `ver`.
+#[allow(unused)]
 fn request_firmware(
     dev: &device::Device,
     chipset: gpu::Chipset,
@@ -43,6 +45,21 @@ fn request_firmware(
     let chip_name = chipset.name();
 
     CString::try_from_fmt(fmt!("nvidia/{chip_name}/gsp/{name}-{ver}.bin"))
+        .and_then(|path| firmware::Firmware::request(&path, dev))
+}
+
+/// Requests the GPU firmware TLV `name` suitable for `chipset`.
+#[allow(unused)]
+fn request_tlv(
+    dev: &device::Device,
+    chipset: gpu::Chipset,
+    name: &str,
+) -> Result<firmware::Firmware> {
+    let chip_name = chipset.name();
+
+    dev_info!(dev, "loading firmware image {}.tlv\n", name);
+
+    CString::try_from_fmt(fmt!("nvidia/{chip_name}/gsp/{name}.tlv"))
         .and_then(|path| firmware::Firmware::request(&path, dev))
 }
 
