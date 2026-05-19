@@ -10,7 +10,7 @@ use kernel::{
     device,
     firmware,
     prelude::*,
-    str::CString,
+    str::{CStr, CString},
     transmute::FromBytes, //
 };
 
@@ -544,5 +544,198 @@ mod elf {
 
             elf.get(start..end)
         })
+    }
+}
+
+pub(crate) struct TlvBlock<'a> {
+    pub(crate) tag: &'a str,
+    pub(crate) value: &'a [u8],
+}
+
+/// On-wire TLV block header: 4-byte ASCII tag + little-endian payload length (bytes, excluding
+/// padding to a 4-byte boundary).
+struct TlvBlockHeader<'a> {
+    tag: &'a str,
+    length: usize,
+}
+
+impl<'a> TlvBlockHeader<'a> {
+    const SIZE: usize = size_of::<[u8; 4]>() + size_of::<u32>();
+
+    /// Parses the first [`Self::SIZE`] bytes of `hdr` (caller may pass a longer slice).
+    fn parse(hdr: &'a [u8]) -> Option<Self> {
+        let hdr = hdr.get(..Self::SIZE)?;
+        let tag_bytes = hdr.get(..4)?;
+        let tag = core::str::from_utf8(tag_bytes).ok()?;
+        if !tag.is_ascii() {
+            return None;
+        }
+        let len_arr = <[u8; 4]>::try_from(hdr.get(4..Self::SIZE)?).ok()?;
+        let length = u32::from_le_bytes(len_arr) as usize;
+        Some(Self { tag, length })
+    }
+}
+
+/// Sequential scan over [`Tlv`]. Unlike [`Tlv`], this type carries a cursor (`pos`) into the
+/// parent blob; it is not interchangeable with a fresh [`Tlv`] view of the same bytes.
+struct TlvIter<'tlv, 'a> {
+    tlv: &'tlv Tlv<'a>,
+    pos: usize,
+}
+
+impl<'tlv, 'a> Iterator for TlvIter<'tlv, 'a> {
+    type Item = TlvBlock<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos >= self.tlv.data.len() {
+            return None;
+        }
+
+        let tail = &self.tlv.data[self.pos..];
+
+        // SAFETY: `Tlv::new` validated this payload as an exact sequence of well-formed blocks;
+        // `tail` starts at a block boundary and contains a full header.
+        let hdr = unsafe { tail.get_unchecked(..TlvBlockHeader::SIZE) };
+        // SAFETY: same header bytes as validated in `Tlv::new` for this offset.
+        let header = unsafe { TlvBlockHeader::parse(hdr).unwrap_unchecked() };
+
+        let stored_size = header.length.next_multiple_of(4);
+        let advance = TlvBlockHeader::SIZE + stored_size;
+        let payload_end = TlvBlockHeader::SIZE + header.length;
+
+        // SAFETY: `advance` and `payload_end` are exactly the stored and logical payload extents
+        // `Tlv::new` accepted for this block.
+        let value = unsafe {
+            let block = tail.get_unchecked(..advance);
+            block.get_unchecked(TlvBlockHeader::SIZE..payload_end)
+        };
+
+        self.pos += advance;
+
+        Some(TlvBlock {
+            tag: header.tag,
+            value,
+        })
+    }
+}
+
+/// The payload of a validated TLV (type, length, value) firmware image.
+///
+/// TLV firmware images start with a 4-byte "NVFW" magic header, followed by a sequence of
+/// blocks. Each block has a 4-byte type tag, a 4-byte length field, and a data payload whose
+/// stored size is the length rounded up to the nearest multiple of 4.
+///
+/// [`Self::new`] checks the magic header and walks every block: tags must be ASCII, lengths and
+/// padding must fit without overflow, and the byte stream after
+/// `NVFW` must be exactly partitionable into blocks (no trailing partial header or slack). After
+/// that, [`TlvIter`] only signals end-of-stream via [`None`], not parse failure.
+#[allow(dead_code)]
+pub(crate) struct Tlv<'a> {
+    data: &'a [u8],
+}
+
+#[allow(dead_code)]
+impl<'a> Tlv<'a> {
+    const MAGIC: &'static [u8; 4] = b"NVFW";
+
+    /// Parses `data` as a TLV firmware image, returning [`EINVAL`] if the image is malformed.
+    pub(crate) fn new(data: &'a [u8]) -> Result<Self> {
+        // Verify that the magic bytes exist and are the correct value
+        let magic_len = Self::MAGIC.len();
+        if data
+            .get(..magic_len)
+            .is_none_or(|magic| magic != Self::MAGIC)
+        {
+            return Err(EINVAL);
+        }
+
+        // The payload is the contiguous sequence of TLV blocks after the magic.
+        let payload = data.get(magic_len..).ok_or(EINVAL)?;
+
+        let mut pos = 0usize;
+        while pos < payload.len() {
+            // Get the next TLV block.
+            let Some(rest) = payload.get(pos..) else {
+                return Err(EINVAL);
+            };
+            // Validate and extract the header (type, length).
+            let Some(header) = rest
+                .get(..TlvBlockHeader::SIZE)
+                .and_then(TlvBlockHeader::parse)
+            else {
+                return Err(EINVAL);
+            };
+            // The `length` field of a TLV block contains the actual byte length of the
+            // value, but each TLV block is aligned to a 4-byte boundary.
+            let Some(stored_size) = header.length.checked_next_multiple_of(4) else {
+                return Err(EINVAL);
+            };
+            let end = pos
+                .checked_add(TlvBlockHeader::SIZE)
+                .and_then(|p| p.checked_add(stored_size))
+                .ok_or(EINVAL)?;
+            if end > payload.len() {
+                return Err(EINVAL);
+            }
+            pos = end;
+        }
+
+        Ok(Self { data: payload })
+    }
+
+    fn iter(&self) -> TlvIter<'_, 'a> {
+        TlvIter { tlv: self, pos: 0 }
+    }
+
+    pub(crate) fn len(&self, tag: &str) -> Result<usize> {
+        let tlv = self.iter().find(|b| b.tag == tag).ok_or(EINVAL)?;
+
+        Ok(tlv.value.len())
+    }
+
+    pub(crate) fn get_bytes(&self, tag: &str) -> Result<&'a [u8]> {
+        let tlv = self.iter().find(|b| b.tag == tag).ok_or(EINVAL)?;
+
+        Ok(tlv.value)
+    }
+
+    pub(crate) fn get_u32(&self, tag: &str) -> Result<u32> {
+        let tlv = self.iter().find(|b| b.tag == tag).ok_or(EINVAL)?;
+
+        tlv.value
+            .try_into()
+            .ok()
+            .map(u32::from_le_bytes)
+            .ok_or(EINVAL)
+    }
+
+    pub(crate) fn get_string(&self, tag: &str) -> Result<&'a str> {
+        let tlv = self.iter().find(|b| b.tag == tag).ok_or(EINVAL)?;
+
+        // For now, handle the possibility that the value is null-terminated.
+        let bytes = match CStr::from_bytes_until_nul(tlv.value) {
+            Ok(cstr) => cstr.to_bytes(),
+            Err(_) => tlv.value,
+        };
+
+        // But do require it to be all ASCII
+        if !bytes.is_ascii() {
+            return Err(EINVAL);
+        }
+
+        core::str::from_utf8(bytes).map_err(|_| EINVAL)
+    }
+
+    pub(crate) fn get_nth_chunk(&self, tag: &str, sigsize: usize, n: usize) -> Result<&'a [u8]> {
+        let sigs = self
+            .iter()
+            .find(|b| b.tag == tag)
+            .map(|b| b.value)
+            .ok_or(EINVAL)?;
+
+        let start = sigsize.checked_mul(n).ok_or(EINVAL)?;
+        let end = start.checked_add(sigsize).ok_or(EINVAL)?;
+
+        sigs.get(start..end).ok_or(EINVAL)
     }
 }
