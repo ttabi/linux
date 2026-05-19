@@ -11,10 +11,7 @@ use kernel::{
     transmute::FromBytes, //
 };
 
-use crate::{
-    firmware::BinFirmware,
-    num::FromSafeCast, //
-};
+use crate::firmware::Tlv;
 
 /// Descriptor for microcode running on a RISC-V core.
 #[repr(C)]
@@ -40,17 +37,13 @@ struct RmRiscvUCodeDesc {
 unsafe impl FromBytes for RmRiscvUCodeDesc {}
 
 impl RmRiscvUCodeDesc {
-    /// Interprets the header of `bin_fw` as a [`RmRiscvUCodeDesc`] and returns it.
+    /// Interprets the beginning of slice `desc` as a [`RmRiscvUCodeDesc`] and returns it.
     ///
-    /// Fails if the header pointed at by `bin_fw` is not within the bounds of the firmware image.
-    fn new(bin_fw: &BinFirmware<'_>) -> Result<Self> {
-        let offset = usize::from_safe_cast(bin_fw.hdr.header_offset);
-        let end = offset.checked_add(size_of::<Self>()).ok_or(EINVAL)?;
-
-        bin_fw
-            .fw
-            .get(offset..end)
-            .and_then(Self::from_bytes_copy)
+    /// Fails if is the slice is too small.
+    fn new(desc: &[u8]) -> Result<Self> {
+        desc
+            .get(..size_of::<RmRiscvUCodeDesc>())
+            .and_then(RmRiscvUCodeDesc::from_bytes_copy)
             .ok_or(EINVAL)
     }
 }
@@ -70,19 +63,13 @@ pub(crate) struct RiscvFirmware {
 }
 
 impl RiscvFirmware {
-    /// Parses the RISC-V firmware image contained in `fw`.
     pub(crate) fn new(dev: &device::Device<device::Bound>, fw: &Firmware) -> Result<Self> {
-        let bin_fw = BinFirmware::new(fw)?;
+        let tlv = Tlv::new(fw.data())?;
 
-        let riscv_desc = RmRiscvUCodeDesc::new(&bin_fw)?;
+        let desc = tlv.get_bytes("DESC")?;
+        let riscv_desc = RmRiscvUCodeDesc::new(desc)?;
 
-        let ucode = {
-            let start = usize::from_safe_cast(bin_fw.hdr.data_offset);
-            let len = usize::from_safe_cast(bin_fw.hdr.data_size);
-            let end = start.checked_add(len).ok_or(EINVAL)?;
-
-            Coherent::from_slice(dev, fw.data().get(start..end).ok_or(EINVAL)?, GFP_KERNEL)?
-        };
+        let ucode = Coherent::from_slice(dev, tlv.get_bytes("BLOB")?, GFP_KERNEL)?;
 
         Ok(Self {
             ucode,
