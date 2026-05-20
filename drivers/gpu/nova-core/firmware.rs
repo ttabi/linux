@@ -28,23 +28,6 @@ pub(crate) mod fwsec;
 pub(crate) mod gsp;
 pub(crate) mod riscv;
 
-#[allow(unused)]
-pub(crate) const FIRMWARE_VERSION: &str = "570.144";
-
-/// Requests the GPU firmware `name` suitable for `chipset`, with version `ver`.
-#[allow(unused)]
-fn request_firmware(
-    dev: &device::Device,
-    chipset: gpu::Chipset,
-    name: &str,
-    ver: &str,
-) -> Result<firmware::Firmware> {
-    let chip_name = chipset.name();
-
-    CString::try_from_fmt(fmt!("nvidia/{chip_name}/gsp/{name}-{ver}.bin"))
-        .and_then(|path| firmware::Firmware::request(&path, dev))
-}
-
 /// Requests the GPU firmware TLV `name` suitable for `chipset`.
 #[allow(unused)]
 fn request_tlv(
@@ -374,10 +357,7 @@ impl<const N: usize> ModInfoBuilder<N> {
                 .push("nvidia/")
                 .push(chipset)
                 .push("/gsp/")
-                .push(fw)
-                .push("-")
-                .push(FIRMWARE_VERSION)
-                .push(".bin"),
+                .push(fw),
         )
     }
 
@@ -385,13 +365,14 @@ impl<const N: usize> ModInfoBuilder<N> {
         let name = chipset.name();
 
         let this = self
-            .make_entry_file(name, "booter_load")
-            .make_entry_file(name, "booter_unload")
-            .make_entry_file(name, "bootloader")
-            .make_entry_file(name, "gsp");
+            .make_entry_file(name, "booter_load.tlv")
+            .make_entry_file(name, "booter_unload.tlv")
+            .make_entry_file(name, "gsp_bootloader.tlv")
+            .make_entry_file(name, "gsp.tlv")
+            .make_entry_file(name, "gsp.bin");
 
         if chipset.needs_fwsec_bootloader() {
-            this.make_entry_file(name, "gen_bootloader")
+            this.make_entry_file(name, "gen_bootloader.tlv")
         } else {
             this
         }
