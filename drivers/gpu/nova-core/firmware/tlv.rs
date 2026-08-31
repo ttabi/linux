@@ -260,6 +260,20 @@ impl<'a> Tlv<'a> {
             .ok_or(EINVAL)
     }
 
+    /// Return a u64, from either a 32-bit or 64-bit little-endian tag.
+    pub(crate) fn get_u64(&self, tag: &[u8; 4]) -> Result<u64> {
+        let value = self.get_bytes(tag)?;
+
+        match value.len() {
+            // `value` is an unsized slice, but from_le_bytes() requires a sized
+            // slice (&[u8; N]), so we need to convert.
+            4 => value.first_chunk().map(|&b| u64::from(u32::from_le_bytes(b))),
+            8 => value.first_chunk().map(|&b| u64::from_le_bytes(b)),
+            _ => None,
+        }
+        .ok_or(EINVAL)
+    }
+
     /// Return a string value.
     pub(crate) fn get_string(&self, tag: &[u8; 4]) -> Result<&'a str> {
         let tlv = self.find(tag)?;

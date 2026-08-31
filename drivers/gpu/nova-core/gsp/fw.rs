@@ -35,7 +35,10 @@ use crate::{
         FbRanges,
         FbSizes, //
     },
-    firmware::gsp::GspFirmware,
+    firmware::{
+        gsp::GspFirmware,
+        tlv::Tlv,
+    },
     gpu::{
         Architecture,
         Chipset, //
@@ -58,24 +61,32 @@ use crate::{
 /// build-time constant, so the driver chooses it and both sides read it from here.
 pub(crate) const GSP_MSG_QUEUE_ELEMENT_SIZE_MAX: usize = GSP_PAGE_SIZE * 16;
 
-/// Empty type to group methods related to heap parameters for running the GSP firmware.
-enum GspFwHeapParams {}
+/// Contains heap size tuning variables from the GSP TLV.
+pub(crate) struct GspFwHeapParams {
+    gspFwHeapBaseSize: u64,
+    gspFwHeapSizePerGb: u64,
+    gspFwHeapBaseSizeVgpu: u64,
+    gspFwHeapSizePerVm: u64,
+}
 
 /// Minimum required alignment for the GSP heap.
 const GSP_HEAP_ALIGNMENT: Alignment = Alignment::new::<{ 1 << 20 }>();
 
 impl GspFwHeapParams {
+    pub(crate) fn new(tlv: &Tlv<'_>) -> Result<Self> {
+        Ok(Self {
+            gspFwHeapBaseSize: dbg!(tlv.get_u64(b"HBSZ")?),
+            gspFwHeapSizePerGb: dbg!(tlv.get_u64(b"HSPG")?),
+            gspFwHeapBaseSizeVgpu: dbg!(tlv.get_u64(b"HBSV")?),
+            gspFwHeapSizePerVm: dbg!(tlv.get_u64(b"HSPV")?),
+            }
+        )
+    }
+
     /// Returns the amount of GSP-RM heap memory used during GSP-RM boot and initialization (up to
     /// and including the first client subdevice allocation).
-    fn base_rm_size(chipset: Chipset) -> u64 {
-        match chipset.arch() {
-            Architecture::Turing | Architecture::Ampere | Architecture::Ada => {
-                u64::from(bindings::GSP_FW_HEAP_PARAM_BASE_RM_SIZE_TU10X)
-            }
-            Architecture::Hopper | Architecture::BlackwellGB10x | Architecture::BlackwellGB20x => {
-                u64::from(bindings::GSP_FW_HEAP_PARAM_BASE_RM_SIZE_GH100)
-            }
-        }
+    fn base_rm_size(&self) -> u64 {
+        self.gspFwHeapBaseSize
     }
 
     /// Returns the amount of heap memory required to support a single channel allocation.

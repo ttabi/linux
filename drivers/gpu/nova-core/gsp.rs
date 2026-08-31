@@ -26,7 +26,7 @@ use kernel::{
 
 pub(crate) mod cmdq;
 pub(crate) mod commands;
-mod fw;
+pub(crate) mod fw;
 #[cfg_attr(not(CONFIG_KUNIT), allow(dead_code))]
 mod nvkv;
 mod regs;
