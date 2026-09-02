@@ -58,24 +58,71 @@ use crate::{
 /// build-time constant, so the driver chooses it and both sides read it from here.
 pub(crate) const GSP_MSG_QUEUE_ELEMENT_SIZE_MAX: usize = GSP_PAGE_SIZE * 16;
 
-/// Empty type to group methods related to heap parameters for running the GSP firmware.
-enum GspFwHeapParams {}
+/// Heap memory requirements and constraints for booting GSP-RM.
+pub(crate) struct GspFwHeapParams {
+    /// The amount of heap memory used during GSP-RM boot and initialization (up to and including
+    /// the first client subdevice allocation), in bytes.
+    base_rm_size: u64,
+    /// The base amount of heap required by the GSP operating system, in bytes.
+    carveout_size: u64,
+    /// The minimum and maximum sizes allowed for the GSP FW heap, in bytes.
+    allowed_heap_size: Range<u64>,
+}
 
 /// Minimum required alignment for the GSP heap.
 const GSP_HEAP_ALIGNMENT: Alignment = Alignment::new::<{ 1 << 20 }>();
 
 impl GspFwHeapParams {
-    /// Returns the amount of GSP-RM heap memory used during GSP-RM boot and initialization (up to
-    /// and including the first client subdevice allocation).
-    fn base_rm_size(chipset: Chipset) -> u64 {
-        match chipset.arch() {
-            Architecture::Turing | Architecture::Ampere | Architecture::Ada => {
-                u64::from(bindings::GSP_FW_HEAP_PARAM_BASE_RM_SIZE_TU10X)
-            }
-            Architecture::Hopper | Architecture::BlackwellGB10x | Architecture::BlackwellGB20x => {
-                u64::from(bindings::GSP_FW_HEAP_PARAM_BASE_RM_SIZE_GH100)
-            }
+    /// Version 2 of the GSP LIBOS (Turing and GA100)
+    fn libos2() -> Self {
+        Self {
+            base_rm_size: num::u32_as_u64(bindings::GSP_FW_HEAP_PARAM_BASE_RM_SIZE_TU10X),
+            carveout_size: num::u32_as_u64(bindings::GSP_FW_HEAP_PARAM_OS_SIZE_LIBOS2),
+            allowed_heap_size: num::u32_as_u64(bindings::GSP_FW_HEAP_SIZE_OVERRIDE_LIBOS2_MIN_MB)
+                * u64::SZ_1M
+                ..num::u32_as_u64(bindings::GSP_FW_HEAP_SIZE_OVERRIDE_LIBOS2_MAX_MB) * u64::SZ_1M,
         }
+    }
+
+    /// Version 3 of the GSP LIBOS (GA102 - AD10x)
+    fn libos3() -> Self {
+        Self {
+            base_rm_size: num::u32_as_u64(bindings::GSP_FW_HEAP_PARAM_BASE_RM_SIZE_TU10X),
+            carveout_size: num::u32_as_u64(bindings::GSP_FW_HEAP_PARAM_OS_SIZE_LIBOS3_BAREMETAL),
+            allowed_heap_size: num::u32_as_u64(
+                bindings::GSP_FW_HEAP_SIZE_OVERRIDE_LIBOS3_BAREMETAL_MIN_MB,
+            ) * u64::SZ_1M
+                ..num::u32_as_u64(bindings::GSP_FW_HEAP_SIZE_OVERRIDE_LIBOS3_BAREMETAL_MAX_MB)
+                    * u64::SZ_1M,
+        }
+    }
+
+    /// Version 3 of the GSP LIBOS, (GH100+)
+    fn libos3_gh100() -> Self {
+        let base = Self::libos3();
+
+        Self {
+            base_rm_size: num::u32_as_u64(bindings::GSP_FW_HEAP_PARAM_BASE_RM_SIZE_GH100),
+            carveout_size: base.carveout_size,
+            allowed_heap_size: base.allowed_heap_size,
+        }
+    }
+
+    /// Returns the heap parameters corresponding to `chipset`.
+    ///
+    /// The parameters reported by GSP-RM are initialized to zero.
+    pub(crate) fn from_chipset(chipset: Chipset) -> Self {
+        match chipset.arch() {
+            Architecture::Turing => Self::libos2(),
+            Architecture::Ampere if chipset < Chipset::GA102 => Self::libos2(),
+            Architecture::Ampere | Architecture::Ada => Self::libos3(),
+            _ => Self::libos3_gh100(),
+        }
+    }
+
+    /// Returns the WPR heap size to reserve when vGPU is enabled.
+    pub(crate) fn vgpu_wpr_heap_size(&self) -> u64 {
+        u64::from(bindings::GSP_FW_HEAP_SIZE_VGPU_DEFAULT)
     }
 
     /// Returns the amount of heap memory required to support a single channel allocation.
@@ -96,62 +143,20 @@ impl GspFwHeapParams {
             .align_up(GSP_HEAP_ALIGNMENT)
             .ok_or(EINVAL)
     }
-}
-
-/// Heap memory requirements and constraints for a given version of the GSP LIBOS.
-pub(crate) struct LibosParams {
-    /// The base amount of heap required by the GSP operating system, in bytes.
-    carveout_size: u64,
-    /// The minimum and maximum sizes allowed for the GSP FW heap, in bytes.
-    allowed_heap_size: Range<u64>,
-}
-
-impl LibosParams {
-    /// Version 2 of the GSP LIBOS (Turing and GA100)
-    const LIBOS2: LibosParams = LibosParams {
-        carveout_size: num::u32_as_u64(bindings::GSP_FW_HEAP_PARAM_OS_SIZE_LIBOS2),
-        allowed_heap_size: num::u32_as_u64(bindings::GSP_FW_HEAP_SIZE_OVERRIDE_LIBOS2_MIN_MB)
-            * u64::SZ_1M
-            ..num::u32_as_u64(bindings::GSP_FW_HEAP_SIZE_OVERRIDE_LIBOS2_MAX_MB) * u64::SZ_1M,
-    };
-
-    /// Version 3 of the GSP LIBOS (GA102+)
-    const LIBOS3: LibosParams = LibosParams {
-        carveout_size: num::u32_as_u64(bindings::GSP_FW_HEAP_PARAM_OS_SIZE_LIBOS3_BAREMETAL),
-        allowed_heap_size: num::u32_as_u64(
-            bindings::GSP_FW_HEAP_SIZE_OVERRIDE_LIBOS3_BAREMETAL_MIN_MB,
-        ) * u64::SZ_1M
-            ..num::u32_as_u64(bindings::GSP_FW_HEAP_SIZE_OVERRIDE_LIBOS3_BAREMETAL_MAX_MB)
-                * u64::SZ_1M,
-    };
-
-    /// Returns the libos parameters corresponding to `chipset`.
-    pub(crate) fn from_chipset(chipset: Chipset) -> &'static LibosParams {
-        if chipset < Chipset::GA102 {
-            &Self::LIBOS2
-        } else {
-            &Self::LIBOS3
-        }
-    }
-
-    /// Returns the WPR heap size to reserve when vGPU is enabled.
-    pub(crate) fn vgpu_wpr_heap_size() -> u64 {
-        u64::from(bindings::GSP_FW_HEAP_SIZE_VGPU_DEFAULT)
-    }
 
     /// Returns the amount of memory (in bytes) to allocate for the WPR heap for a framebuffer size
-    /// of `fb_size` (in bytes) for `chipset`.
-    pub(crate) fn wpr_heap_size(&self, chipset: Chipset, fb_size: u64) -> Result<u64> {
+    /// of `fb_size` (in bytes).
+    pub(crate) fn wpr_heap_size(&self, fb_size: u64) -> Result<u64> {
         // The WPR heap will contain the following:
         // LIBOS carveout,
         Ok(self
             .carveout_size
             // RM boot working memory,
-            .saturating_add(GspFwHeapParams::base_rm_size(chipset))
+            .saturating_add(self.base_rm_size)
             // One RM client,
-            .saturating_add(GspFwHeapParams::client_alloc_size())
+            .saturating_add(Self::client_alloc_size())
             // Overhead for memory management.
-            .saturating_add(GspFwHeapParams::management_overhead(fb_size)?)
+            .saturating_add(Self::management_overhead(fb_size)?)
             // Clamp to the supported heap sizes.
             .clamp(self.allowed_heap_size.start, self.allowed_heap_size.end - 1))
     }
