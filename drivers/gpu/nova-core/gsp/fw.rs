@@ -37,7 +37,8 @@ use crate::{
     },
     firmware::{
         bindata::UcodesImage,
-        gsp::GspFirmware, //
+        gsp::GspFirmware,
+        tlv::Tlv, //
     },
     gpu::{
         Architecture,
@@ -74,6 +75,19 @@ pub(crate) struct GspFwHeapParams {
     carveout_size: u64,
     /// The minimum and maximum sizes allowed for the GSP FW heap, in bytes.
     allowed_heap_size: Range<u64>,
+
+    #[expect(unused)]
+    tlv_gsp_fw_heap_base_size: u64,
+    #[expect(unused)]
+    tlv_gsp_hw_heap_size_per_gb: u64,
+    #[expect(unused)]
+    tlv_gsp_fw_heap_base_size_vgpu: u64,
+    #[expect(unused)]
+    tlv_gsp_fw_heap_size_per_vm: u64,
+    #[expect(unused)]
+    tlv_pmu_reserved_size: u32,
+    #[expect(unused)]
+    tlv_non_wpr_heap_size: u64,
 }
 
 /// Minimum required alignment for the GSP heap.
@@ -88,6 +102,13 @@ impl GspFwHeapParams {
             allowed_heap_size: cv!(bindings::GSP_FW_HEAP_SIZE_OVERRIDE_LIBOS2_MIN_MB => u64)
                 * u64::SZ_1M
                 ..cv!(bindings::GSP_FW_HEAP_SIZE_OVERRIDE_LIBOS2_MAX_MB => u64) * u64::SZ_1M,
+
+            tlv_gsp_fw_heap_base_size: 0,
+            tlv_gsp_hw_heap_size_per_gb: 0,
+            tlv_gsp_fw_heap_base_size_vgpu: 0,
+            tlv_gsp_fw_heap_size_per_vm: 0,
+            tlv_pmu_reserved_size: 0,
+            tlv_non_wpr_heap_size: 0,
         }
     }
 
@@ -101,6 +122,13 @@ impl GspFwHeapParams {
                 * u64::SZ_1M
                 ..cv!(bindings::GSP_FW_HEAP_SIZE_OVERRIDE_LIBOS3_BAREMETAL_MAX_MB => u64)
                     * u64::SZ_1M,
+
+            tlv_gsp_fw_heap_base_size: 0,
+            tlv_gsp_hw_heap_size_per_gb: 0,
+            tlv_gsp_fw_heap_base_size_vgpu: 0,
+            tlv_gsp_fw_heap_size_per_vm: 0,
+            tlv_pmu_reserved_size: 0,
+            tlv_non_wpr_heap_size: 0,
         }
     }
 
@@ -112,7 +140,27 @@ impl GspFwHeapParams {
             base_rm_size: cv!(bindings::GSP_FW_HEAP_PARAM_BASE_RM_SIZE_GH100),
             carveout_size: base.carveout_size,
             allowed_heap_size: base.allowed_heap_size,
+
+            tlv_gsp_fw_heap_base_size: 0,
+            tlv_gsp_hw_heap_size_per_gb: 0,
+            tlv_gsp_fw_heap_base_size_vgpu: 0,
+            tlv_gsp_fw_heap_size_per_vm: 0,
+            tlv_pmu_reserved_size: 0,
+            tlv_non_wpr_heap_size: 0,
         }
+    }
+
+    /// Heap range limits for LIBOS v2
+    fn libos2_range() -> Range<u64> {
+        num::u32_as_u64(bindings::GSP_FW_HEAP_SIZE_OVERRIDE_LIBOS2_MIN_MB) * u64::SZ_1M
+            ..num::u32_as_u64(bindings::GSP_FW_HEAP_SIZE_OVERRIDE_LIBOS2_MAX_MB) * u64::SZ_1M
+    }
+
+    /// Heap range limits for LIBOS v3
+    fn libos3_range() -> Range<u64> {
+        num::u32_as_u64(bindings::GSP_FW_HEAP_SIZE_OVERRIDE_LIBOS3_BAREMETAL_MIN_MB) * u64::SZ_1M
+            ..num::u32_as_u64(bindings::GSP_FW_HEAP_SIZE_OVERRIDE_LIBOS3_BAREMETAL_MAX_MB)
+                * u64::SZ_1M
     }
 
     /// Returns the heap parameters corresponding to `chipset`.
@@ -125,6 +173,30 @@ impl GspFwHeapParams {
             Architecture::Ampere | Architecture::Ada => Self::libos3(),
             _ => Self::libos3_gh100(),
         }
+    }
+
+    /// Returns the heap parameters corresponding to `chipset`.
+    ///
+    /// The parameters reported by GSP-RM are initialized to zero.
+    #[expect(unused)]
+    pub(crate) fn from_tlv(chipset: Chipset, tlv: &Tlv<'_>) -> Result<Self> {
+        let allowed_heap_size = match chipset.arch() {
+            Architecture::Turing => Self::libos2_range(),
+            Architecture::Ampere if chipset < Chipset::GA102 => Self::libos2_range(),
+            _ => Self::libos3_range(),
+        };
+
+        Ok(Self {
+            base_rm_size: 0,
+            carveout_size: 0,
+            allowed_heap_size,
+            tlv_gsp_fw_heap_base_size: tlv.get_u64(b"HBSZ")?,
+            tlv_gsp_hw_heap_size_per_gb: tlv.get_u64(b"HSPG")?,
+            tlv_gsp_fw_heap_base_size_vgpu: tlv.get_u64(b"HBSV")?,
+            tlv_gsp_fw_heap_size_per_vm: tlv.get_u64(b"HSPV")?,
+            tlv_pmu_reserved_size: tlv.get_u32(b"PRSZ")?,
+            tlv_non_wpr_heap_size: tlv.get_u64(b"GNWH")?,
+        })
     }
 
     /// Returns the WPR heap size to reserve when vGPU is enabled.
