@@ -37,7 +37,8 @@ use crate::{
     },
     firmware::{
         bindata::UcodesImage,
-        gsp::GspFirmware, //
+        gsp::GspFirmware,
+        tlv::Tlv, //
     },
     gpu::{
         Architecture,
@@ -65,8 +66,21 @@ use crate::{
 /// build-time constant, so the driver chooses it, and this constant is the one copy.
 pub(crate) const GSP_MSG_QUEUE_ELEMENT_SIZE_MAX: usize = GSP_PAGE_SIZE * 16;
 
-/// Empty type to group methods related to heap parameters for running the GSP firmware.
-enum GspFwHeapParams {}
+/// Heap memory requirements and constraints for booting GSP-RM.
+pub(crate) struct GspFwHeapParams {
+    #[expect(unused)]
+    tlv_gsp_fw_heap_base_size: u64,
+    #[expect(unused)]
+    tlv_gsp_hw_heap_size_per_gb: u64,
+    #[expect(unused)]
+    tlv_gsp_fw_heap_base_size_vgpu: u64,
+    #[expect(unused)]
+    tlv_gsp_fw_heap_size_per_vm: u64,
+    #[expect(unused)]
+    tlv_pmu_reserved_size: u32,
+    #[expect(unused)]
+    tlv_non_wpr_heap_size: u64,
+}
 
 /// Minimum required alignment for the GSP heap.
 const GSP_HEAP_ALIGNMENT: Alignment = Alignment::new::<{ 1 << 20 }>();
@@ -83,6 +97,19 @@ impl GspFwHeapParams {
                 u64::from(bindings::GSP_FW_HEAP_PARAM_BASE_RM_SIZE_GH100)
             }
         }
+    }
+
+    /// Returns the heap parameters from the TLV
+    #[expect(unused)]
+    pub(crate) fn from_tlv(tlv: &Tlv<'_>) -> Result<Self> {
+        Ok(Self {
+            tlv_gsp_fw_heap_base_size: tlv.get_u64(b"HBSZ")?,
+            tlv_gsp_hw_heap_size_per_gb: tlv.get_u64(b"HSPG")?,
+            tlv_gsp_fw_heap_base_size_vgpu: tlv.get_u64(b"HBSV")?,
+            tlv_gsp_fw_heap_size_per_vm: tlv.get_u64(b"HSPV")?,
+            tlv_pmu_reserved_size: tlv.get_u32(b"PRSZ")?,
+            tlv_non_wpr_heap_size: tlv.get_u64(b"GNWH")?,
+        })
     }
 
     /// Returns the amount of heap memory required to support a single channel allocation.
