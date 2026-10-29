@@ -261,7 +261,6 @@ impl<'a> Tlv<'a> {
     }
 
     /// Return a u64, from either a 32-bit or 64-bit little-endian tag.
-    #[expect(unused)]
     pub(crate) fn get_u64(&self, tag: &[u8; 4]) -> Result<u64> {
         let value = self.get_bytes(tag)?;
 
