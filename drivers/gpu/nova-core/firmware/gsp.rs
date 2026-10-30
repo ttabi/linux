@@ -20,7 +20,8 @@ use crate::{
             Tlv, //
         },
     },
-    gpu::Chipset, //
+    gpu::Chipset,
+    gsp::GspFwHeapParams, //
 };
 
 /// GSP firmware with 3-level radix page tables for the GSP bootloader.
@@ -39,6 +40,8 @@ pub(crate) struct GspFirmware {
     pub(crate) signatures: Coherent<[u8]>,
     /// GSP bootloader, verifies the GSP firmware before loading and running it.
     pub(crate) bootloader: RiscvFirmware,
+    /// Heap sizing parameters reported by the firmware metadata.
+    pub(crate) heap_params: GspFwHeapParams,
 }
 
 impl GspFirmware {
@@ -72,6 +75,7 @@ impl GspFirmware {
 
                     RiscvFirmware::new(dev, &bl)?
                 },
+                heap_params: GspFwHeapParams::from_tlv(chipset, &tlv)?,
             }))
         })
     }
