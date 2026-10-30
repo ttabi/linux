@@ -6,8 +6,7 @@
 use kernel::{
     io::Io,
     num::Bounded,
-    prelude::*,
-    sizes::SizeConstants, //
+    prelude::*, //
 };
 
 use crate::{
@@ -65,15 +64,6 @@ impl FbHal for Gb202 {
 
     fn vidmem_size(&self, bar: Bar0<'_>) -> u64 {
         super::ga102::vidmem_size_ga102(bar)
-    }
-
-    fn pmu_reserved_size(&self) -> u32 {
-        super::gb100::pmu_reserved_size_gb100()
-    }
-
-    fn non_wpr_heap_size(&self) -> u64 {
-        // Open RM's kgspGetNonWprHeapSize returns a flat 3 MiB for GB20x.
-        3 * u64::SZ_1M
     }
 
     fn frts_size(&self) -> u64 {

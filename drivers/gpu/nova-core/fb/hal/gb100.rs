@@ -12,12 +12,7 @@ use kernel::{
         Io, //
     },
     num::Bounded,
-    prelude::*,
-    ptr::{
-        const_align_up,
-        Alignment, //
-    },
-    sizes::*, //
+    prelude::*, //
 };
 
 use crate::{
@@ -26,7 +21,6 @@ use crate::{
         hal::FbHal,
         regs, //
     },
-    num::usize_into_u32,
 };
 
 struct Gb100;
@@ -80,29 +74,6 @@ fn write_sysmem_flush_page_gb100(bar: Bar0<'_>, addr: Bounded<u64, 52>) {
     );
 }
 
-/// PMU backing store (see Open RM: `kpmuReservedMemoryBackingStoreSizeGet`).
-const PMU_BACKING_STORE_SIZE: usize = 9 * SZ_1M;
-
-/// PMU communication surfaces (see Open RM: `gpuGetPmuReservedMemorySurfacesSize`).
-const PMU_SURFACES_SIZE: usize = SZ_16M + SZ_256K;
-
-/// Miscellaneous PMU memory (see Open RM: `kpmuReservedMemoryMiscSizeGet`).
-const PMU_MISC_SIZE: usize = SZ_4K;
-
-// Open RM reserves the backing store, the surfaces and the misc memory as one region above
-// FRTS, aligned to KPMU_RESERVED_MEMORY_ALIGNMENT (see kpmuReservedMemorySizeGet).
-pub(super) const fn pmu_reserved_size_gb100() -> u32 {
-    usize_into_u32::<
-        {
-            const_align_up(
-                PMU_BACKING_STORE_SIZE + PMU_SURFACES_SIZE + PMU_MISC_SIZE,
-                Alignment::new::<SZ_128K>(),
-            )
-            .unwrap()
-        },
-    >()
-}
-
 impl FbHal for Gb100 {
     fn read_sysmem_flush_page(&self, bar: Bar0<'_>) -> u64 {
         read_sysmem_flush_page_gb100(bar)
@@ -122,15 +93,6 @@ impl FbHal for Gb100 {
 
     fn vidmem_size(&self, bar: Bar0<'_>) -> u64 {
         super::ga102::vidmem_size_ga102(bar)
-    }
-
-    fn pmu_reserved_size(&self) -> u32 {
-        pmu_reserved_size_gb100()
-    }
-
-    fn non_wpr_heap_size(&self) -> u64 {
-        // Open RM's kgspGetNonWprHeapSize returns a flat 2 MiB for GB10x.
-        u64::SZ_2M
     }
 
     fn frts_size(&self) -> u64 {
