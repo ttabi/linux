@@ -483,7 +483,7 @@ impl<'cmdq> Cmdq<'cmdq> {
     pub(crate) const NUM_PTES: usize = size_of::<GspMem>() >> GSP_PAGE_SHIFT;
 
     /// Default timeout for receiving a message from the GSP.
-    pub(super) const RECEIVE_TIMEOUT: Delta = Delta::from_secs(5);
+    pub(super) const RECEIVE_TIMEOUT: Delta = Delta::from_secs(30);
 
     /// Creates a new command queue for `dev`.
     pub(crate) fn new(
