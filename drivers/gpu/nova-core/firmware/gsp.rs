@@ -18,7 +18,8 @@ use crate::{
             Tlv,
         },
     },
-    gpu::Chipset, //
+    gpu::Chipset,
+    gsp::GspFwHeapParams, //
 };
 
 /// The GSP firmware image, its signatures, and the GSP bootloader.
@@ -31,6 +32,8 @@ pub(crate) struct GspFirmware<'a> {
     pub(crate) signatures: Coherent<'a, [u8]>,
     /// GSP bootloader, verifies the GSP firmware before loading and running it.
     pub(crate) bootloader: RiscvFirmware<'a>,
+    /// Heap sizing parameters reported by the firmware metadata.
+    pub(crate) heap_params: GspFwHeapParams,
 }
 
 impl<'a> GspFirmware<'a> {
@@ -49,6 +52,8 @@ impl<'a> GspFirmware<'a> {
 
             let signatures = Coherent::from_slice(dev, tlv.get_bytes(b"SIGN")?, GFP_KERNEL)?;
 
+            let heap_params = GspFwHeapParams::from_tlv(&tlv)?;
+
             Ok(try_pin_init!(Self {
                 radix3 <- Radix3::new(dev, fw_vvec),
                 signatures,
@@ -57,6 +62,7 @@ impl<'a> GspFirmware<'a> {
 
                     RiscvFirmware::new(dev, &bl)?
                 },
+                heap_params,
             }))
         })
     }

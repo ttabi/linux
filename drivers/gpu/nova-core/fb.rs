@@ -278,7 +278,7 @@ impl FbRanges {
             wpr2,
             non_wpr_heap,
             vf_partition_count,
-            pmu_reserved_size: hal.pmu_reserved_size(),
+            pmu_reserved_size: gsp_fw.heap_params.tlv_pmu_reserved_size,
         })
     }
 }
@@ -328,7 +328,10 @@ pub(crate) struct FbSizes {
 
 impl FbSizes {
     /// Computes the framebuffer region sizes for GSP-FMC boot.
-    pub(crate) fn new(chipset: Chipset, bar: Bar0<'_>, vgpu_state: VgpuState) -> Result<Self> {
+    pub(crate) fn new(chipset: Chipset, bar: Bar0<'_>,
+       gsp_fw: &GspFirmware<'_>,
+
+    vgpu_state: VgpuState) -> Result<Self> {
         let hal = hal::fb_hal(chipset);
         let fb_size = hal.vidmem_size(bar);
         let (vf_partition_count, wpr2_heap_size) = wpr2_heap_params(chipset, vgpu_state, fb_size)?;
@@ -337,7 +340,7 @@ impl FbSizes {
             frts_size: hal.frts_size(),
             wpr2_heap_size,
             non_wpr_heap_size: hal.non_wpr_heap_size(),
-            pmu_reserved_size: hal.pmu_reserved_size(),
+            pmu_reserved_size: gsp_fw.heap_params.tlv_pmu_reserved_size,
             vf_partition_count,
         })
     }

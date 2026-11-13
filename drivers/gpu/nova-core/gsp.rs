@@ -29,6 +29,7 @@ mod regs;
 
 pub(crate) use fw::{
     GspFmcBootParams,
+    GspFwHeapParams,
     GspFwWprMeta,
     LibosMemoryRegionInitArgument,
     LibosParams, //

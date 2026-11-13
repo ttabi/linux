@@ -76,10 +76,9 @@ pub(crate) struct GspFwHeapParams {
     tlv_gsp_fw_heap_base_size_vgpu: u64,
     #[expect(unused)]
     tlv_gsp_fw_heap_size_per_vm: u64,
+    pub(crate) tlv_pmu_reserved_size: u32,
     #[expect(unused)]
-    tlv_pmu_reserved_size: u32,
-    #[expect(unused)]
-    tlv_non_wpr_heap_size: u64,
+    pub(crate) tlv_non_wpr_heap_size: u64,
 }
 
 /// Minimum required alignment for the GSP heap.
@@ -100,7 +99,6 @@ impl GspFwHeapParams {
     }
 
     /// Returns the heap parameters from the TLV
-    #[expect(unused)]
     pub(crate) fn from_tlv(tlv: &Tlv<'_>) -> Result<Self> {
         Ok(Self {
             tlv_gsp_fw_heap_base_size: tlv.get_u64(b"HBSZ")?,
